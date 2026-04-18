@@ -29,7 +29,7 @@ struct SettingRef<'a> {
 
 fn main() {
     let root = workspace_root();
-    let settings_path = root.join("settings.toml");
+    let settings_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("settings.toml");
     let out_dir = root.join("docs/settings");
     let raw = fs::read_to_string(&settings_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", settings_path.display()));
@@ -178,7 +178,7 @@ fn render_page(page: Page, settings: &[SettingRef<'_>]) -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "Aube generates this page from [`settings.toml`](https://github.com/endevco/aube/blob/main/settings.toml). Edit that registry and rerun `{COMMAND}` instead of editing this page by hand."
+        "Aube generates this page from [`settings.toml`](https://github.com/endevco/aube/blob/main/crates/aube-settings/settings.toml). Edit that registry and rerun `{COMMAND}` instead of editing this page by hand."
     )
     .unwrap();
     writeln!(out).unwrap();
