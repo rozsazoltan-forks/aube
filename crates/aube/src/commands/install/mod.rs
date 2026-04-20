@@ -16,14 +16,15 @@ pub(crate) use settings::PeerDependencyRules;
 pub(crate) use side_effects_cache::{SideEffectsCacheConfig, side_effects_cache_root};
 
 use settings::{
-    ResolverConfigInputs, configure_resolver, default_lockfile_network_concurrency,
-    default_streaming_network_concurrency, find_gvs_incompatible_trigger,
-    maybe_cleanup_unused_catalogs, resolve_dedupe_peer_dependents, resolve_dedupe_peers,
-    resolve_git_shallow_hosts, resolve_link_concurrency, resolve_network_concurrency,
-    resolve_peers_from_workspace_root, resolve_peers_suffix_max_length, resolve_side_effects_cache,
+    ResolverConfigInputs, check_unmet_peers, configure_resolver,
+    default_lockfile_network_concurrency, default_streaming_network_concurrency,
+    find_gvs_incompatible_trigger, maybe_cleanup_unused_catalogs, resolve_dedupe_peer_dependents,
+    resolve_dedupe_peers, resolve_git_shallow_hosts, resolve_link_concurrency,
+    resolve_network_concurrency, resolve_peers_from_workspace_root,
+    resolve_peers_suffix_max_length, resolve_side_effects_cache,
     resolve_side_effects_cache_readonly, resolve_strict_peer_dependencies,
     resolve_strict_store_pkg_content_check, resolve_symlink, resolve_use_running_store_server,
-    resolve_verify_store_integrity, warn_unmet_peers,
+    resolve_verify_store_integrity,
 };
 use side_effects_cache::{SideEffectsCacheEntry, SideEffectsCacheRestore};
 
@@ -3207,15 +3208,25 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
     // `graph.catalogs`.
     maybe_cleanup_unused_catalogs(&cwd, &settings_ctx, &workspace_catalogs, &graph.catalogs)?;
 
-    // 5a. Scan the resolved graph for unmet required peer dependencies
-    //     and surface them as warnings. Matches pnpm's behavior of
-    //     printing unmet peers but never failing the install over them.
-    //     Optional peers (peerDependenciesMeta.optional) are
-    //     deliberately skipped — `auto-install-peers=true` installs
-    //     them but suppresses the warning.
-    let strict_peer_deps = resolve_strict_peer_dependencies(&settings_ctx);
-    let peer_rules = PeerDependencyRules::resolve(&manifest, &settings_ctx);
-    warn_unmet_peers(&graph, strict_peer_deps, &peer_rules)?;
+    // 5a. Under `strict-peer-dependencies=true`, scan the resolved
+    //     graph for unmet required peers and fail the install with the
+    //     list. Default (strict=false) is silent, matching bun/npm/yarn
+    //     — the previous pnpm-style warn-on-every-mismatch default
+    //     produced a lot of noise on real-world trees and buried the
+    //     genuinely actionable ones. Optional peers
+    //     (peerDependenciesMeta.optional) are skipped either way, and
+    //     `peerDependencyRules` escape hatches filter out matches
+    //     before the strict check fires.
+    //
+    //     The `PeerDependencyRules::resolve` call is gated on strict
+    //     because it reads across package.json / .npmrc /
+    //     pnpm-workspace.yaml to build the three escape-hatch lists —
+    //     allocation + file-source iteration nobody consumes on the
+    //     silent default path.
+    if resolve_strict_peer_dependencies(&settings_ctx) {
+        let peer_rules = PeerDependencyRules::resolve(&manifest, &settings_ctx);
+        check_unmet_peers(&graph, &peer_rules)?;
+    }
 
     // 5b. Apply --prod / --dev / --no-optional filters. Drops the corresponding
     //     direct dep roots from every importer and prunes transitive packages

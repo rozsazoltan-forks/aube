@@ -600,17 +600,19 @@ pub(super) fn configure_resolver(
     resolver
 }
 
-/// Emit pnpm-style warnings for every declared required peer dep whose
-/// resolved version doesn't satisfy the declared range, or that isn't
-/// in the tree at all. When `strict` is true (pnpm's
-/// `strict-peer-dependencies`), returns an `Err` after printing the
-/// same lines so the install fails. Peers that match one of the
-/// `PeerDependencyRules` escape hatches (`ignoreMissing`, `allowAny`,
-/// `allowedVersions`) are filtered out before either warn or error —
+/// Check the resolved graph for declared required peer deps whose
+/// version doesn't satisfy the declared range, or that aren't in the
+/// tree at all. Prints the list of unmet peers and returns an `Err`
+/// so the install fails.
+///
+/// Only called under `strict-peer-dependencies=true`. The default
+/// install path skips this entirely — aube is silent about peer
+/// mismatches by default, matching bun/npm/yarn. Peers that match one
+/// of the `PeerDependencyRules` escape hatches (`ignoreMissing`,
+/// `allowAny`, `allowedVersions`) are filtered out before the check,
 /// same as pnpm.
-pub(super) fn warn_unmet_peers(
+pub(super) fn check_unmet_peers(
     graph: &aube_lockfile::LockfileGraph,
-    strict: bool,
     rules: &PeerDependencyRules,
 ) -> miette::Result<()> {
     let unmet: Vec<_> = aube_resolver::detect_unmet_peers(graph)
@@ -620,17 +622,11 @@ pub(super) fn warn_unmet_peers(
     if unmet.is_empty() {
         return Ok(());
     }
-    let header = if strict {
-        "error: Issues with peer dependencies found"
-    } else {
-        "warn: Issues with peer dependencies found"
-    };
-    let prefix = if strict { "error:" } else { "warn:" };
-    eprintln!("{header}");
+    eprintln!("error: Issues with peer dependencies found");
     for u in &unmet {
         match &u.found {
             Some(found) => eprintln!(
-                "{prefix}   {}@{}: expected peer {}@{}, found {}",
+                "error:   {}@{}: expected peer {}@{}, found {}",
                 u.from_name,
                 version_from_dep_path(&u.from_dep_path, &u.from_name),
                 u.peer_name,
@@ -638,7 +634,7 @@ pub(super) fn warn_unmet_peers(
                 found,
             ),
             None => eprintln!(
-                "{prefix}   {}@{}: missing required peer {}@{}",
+                "error:   {}@{}: missing required peer {}@{}",
                 u.from_name,
                 version_from_dep_path(&u.from_dep_path, &u.from_name),
                 u.peer_name,
@@ -646,14 +642,11 @@ pub(super) fn warn_unmet_peers(
             ),
         }
     }
-    if strict {
-        return Err(miette!(
-            "{} unmet peer dependenc{} (strict-peer-dependencies is enabled)",
-            unmet.len(),
-            if unmet.len() == 1 { "y" } else { "ies" }
-        ));
-    }
-    Ok(())
+    Err(miette!(
+        "{} unmet peer dependenc{} (strict-peer-dependencies is enabled)",
+        unmet.len(),
+        if unmet.len() == 1 { "y" } else { "ies" }
+    ))
 }
 
 /// Resolved `pnpm.peerDependencyRules` — the three escape hatches pnpm
