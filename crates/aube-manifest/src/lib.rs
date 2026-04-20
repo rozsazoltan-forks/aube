@@ -219,7 +219,14 @@ impl PackageJson {
     pub fn from_path(path: &Path) -> Result<Self, Error> {
         let content =
             std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
-        serde_json::from_str(&content).map_err(|e| Error::Parse(path.to_path_buf(), e))
+        Self::parse(path, content)
+    }
+
+    /// Parse an in-memory `package.json` string. On failure, produces a
+    /// [`Error::Parse`] with the source content and a span so `miette`'s
+    /// `fancy` handler renders a pointer at the offending byte.
+    pub fn parse(path: &Path, content: String) -> Result<Self, Error> {
+        parse_json(path, content)
     }
 
     /// Iterate over the `pnpm` and `aube` config objects in
@@ -674,14 +681,97 @@ fn push_unique_strs(dst: &mut Vec<String>, arr: &[serde_json::Value]) {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
     #[error("failed to read {0}: {1}")]
     Io(std::path::PathBuf, std::io::Error),
-    #[error("failed to parse {0}: {1}")]
-    Parse(std::path::PathBuf, serde_json::Error),
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Parse(Box<ParseError>),
     #[error("failed to parse {0}: {1}")]
     YamlParse(std::path::PathBuf, String),
+}
+
+/// JSON parse failure with enough info for `miette`'s `fancy` handler to
+/// render a pointer at the offending byte. Boxed into [`Error::Parse`] so
+/// the enum's `Err` size stays small (clippy's `result_large_err`).
+///
+/// `Diagnostic` is implemented by hand rather than via `miette::Diagnostic`
+/// derive because `miette-derive` 7.6 expands into a destructuring that
+/// triggers `unused_assignments` under `RUSTFLAGS=-D warnings` on rustc
+/// 1.93 (our MSRV).
+#[derive(Debug, thiserror::Error)]
+#[error("failed to parse {path}: {message}")]
+pub struct ParseError {
+    pub path: std::path::PathBuf,
+    pub message: String,
+    pub src: miette::NamedSource<String>,
+    pub span: miette::SourceSpan,
+}
+
+impl miette::Diagnostic for ParseError {
+    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
+        Some(&self.src)
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
+        Some(Box::new(std::iter::once(
+            miette::LabeledSpan::new_with_span(Some(self.message.clone()), self.span),
+        )))
+    }
+}
+
+/// Parse a JSON document from `content`, returning an [`Error::Parse`] on
+/// failure with the source content + span attached so miette's fancy
+/// handler can render a pointer into the offending file.
+pub fn parse_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    content: String,
+) -> Result<T, Error> {
+    match serde_json::from_str(&content) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(Error::parse(path, content, &e)),
+    }
+}
+
+impl Error {
+    /// Build an [`Error::Parse`] from the offending content + serde error,
+    /// computing the byte offset so miette can render a pointer into the
+    /// source.
+    pub fn parse(path: &Path, content: String, err: &serde_json::Error) -> Self {
+        let offset = line_col_to_byte_offset(&content, err.line(), err.column());
+        // Clamp the span length so it never extends past the content
+        // end. A trailing-newline-EOF error reports a position at or
+        // past `content.len()`; a fixed length of 1 would push the
+        // range one byte past the source and miette's renderer would
+        // fail to slice it. A zero-length span at `content.len()` is
+        // what miette expects for "end-of-input" labels.
+        let len = if offset >= content.len() { 0 } else { 1 };
+        let span = miette::SourceSpan::new(offset.into(), len);
+        Error::Parse(Box::new(ParseError {
+            path: path.to_path_buf(),
+            message: err.to_string(),
+            src: miette::NamedSource::new(path.display().to_string(), content),
+            span,
+        }))
+    }
+}
+
+/// Convert serde_json's 1-based line/column into a byte offset into
+/// `content`. Out-of-range values clamp to the end so we never panic
+/// on a degenerate error position.
+fn line_col_to_byte_offset(content: &str, line: usize, column: usize) -> usize {
+    if line == 0 {
+        return 0;
+    }
+    let mut offset = 0usize;
+    for (i, l) in content.split_inclusive('\n').enumerate() {
+        if i + 1 == line {
+            return (offset + column.saturating_sub(1)).min(content.len());
+        }
+        offset += l.len();
+    }
+    content.len()
 }
 
 #[cfg(test)]
@@ -729,6 +819,77 @@ mod tests {
     fn engines_missing_field_is_empty() {
         let p = parse(r#"{"name":"x"}"#);
         assert!(p.engines.is_empty());
+    }
+
+    /// Sanity-check the line/column → byte-offset conversion. An
+    /// off-by-one here silently slides miette's pointer to the wrong
+    /// byte, defeating the whole reason the source span exists.
+    #[test]
+    fn line_col_offset_single_line_col_one() {
+        assert_eq!(line_col_to_byte_offset("{}", 1, 1), 0);
+    }
+
+    #[test]
+    fn line_col_offset_multiline_line_two() {
+        // "a\nbc\n" — line 2, column 1 is the 'b' at byte 2.
+        assert_eq!(line_col_to_byte_offset("a\nbc\n", 2, 1), 2);
+        assert_eq!(line_col_to_byte_offset("a\nbc\n", 2, 2), 3);
+    }
+
+    /// `line == 0` can happen if serde_json hits EOF before any input;
+    /// treat as "beginning of file" rather than panic.
+    #[test]
+    fn line_col_offset_line_zero_returns_zero() {
+        assert_eq!(line_col_to_byte_offset("any", 0, 5), 0);
+    }
+
+    /// A column past the end of its line (or past EOF) clamps to the
+    /// last valid offset so we never build a SourceSpan that would
+    /// crash miette's renderer.
+    #[test]
+    fn line_col_offset_column_past_end_clamps() {
+        let s = "ab";
+        assert_eq!(line_col_to_byte_offset(s, 1, 999), s.len());
+    }
+
+    /// A line past the last line falls through the loop and clamps to
+    /// the file end.
+    #[test]
+    fn line_col_offset_line_past_end_clamps() {
+        let s = "a\nb";
+        assert_eq!(line_col_to_byte_offset(s, 10, 1), s.len());
+    }
+
+    /// A file whose last line has no trailing `\n` is the common case;
+    /// make sure columns on that final line still resolve correctly.
+    #[test]
+    fn line_col_offset_no_trailing_newline() {
+        let s = "a\nbc";
+        assert_eq!(line_col_to_byte_offset(s, 2, 2), 3);
+    }
+
+    /// `serde_json` reports "EOF while parsing" with a position at or
+    /// past `content.len()` (e.g. `{"name":` → column 8 on a 8-byte
+    /// buffer). The span must never extend past the end of source or
+    /// `miette`'s renderer chokes trying to slice it — clamp the span
+    /// length to 0 at EOF.
+    #[test]
+    fn parse_error_eof_span_stays_in_bounds() {
+        let path = Path::new("pkg.json");
+        let content = r#"{"name":"#.to_string();
+        let json_err: serde_json::Error = serde_json::from_str::<serde_json::Value>(&content)
+            .expect_err("truncated JSON must fail");
+        let Error::Parse(pe) = Error::parse(path, content.clone(), &json_err) else {
+            panic!("Error::parse must produce Parse variant");
+        };
+        let offset: usize = pe.span.offset();
+        let len: usize = pe.span.len();
+        assert!(
+            offset + len <= content.len(),
+            "span [{offset}, {}) exceeds content.len() {}",
+            offset + len,
+            content.len()
+        );
     }
 
     #[test]
