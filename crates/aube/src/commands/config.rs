@@ -54,11 +54,25 @@ pub struct KeyArgs {
     /// or an `.npmrc` alias (e.g. `auto-install-peers`).
     pub key: String,
 
+    /// Shortcut for `--location project`.
+    #[arg(long, conflicts_with = "location")]
+    pub local: bool,
+
     /// Which `.npmrc` file to act on.
     ///
     /// Defaults to `user` (`~/.npmrc`), matching pnpm.
     #[arg(long, value_enum, default_value_t = Location::User)]
     pub location: Location,
+}
+
+impl KeyArgs {
+    fn effective_location(&self) -> Location {
+        if self.local {
+            Location::Project
+        } else {
+            self.location
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -76,6 +90,10 @@ pub struct GetArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// Shortcut for `--location project`.
+    #[arg(long, conflicts_with = "location")]
+    pub local: bool,
+
     /// Which `.npmrc` file(s) to read.
     ///
     /// Defaults to `merged` — the last-write-wins view of `~/.npmrc`
@@ -83,6 +101,16 @@ pub struct GetArgs {
     /// `user` or `project` to restrict the lookup to a single file.
     #[arg(long, value_enum, default_value_t = ListLocation::Merged)]
     pub location: ListLocation,
+}
+
+impl GetArgs {
+    fn effective_location(&self) -> ListLocation {
+        if self.local {
+            ListLocation::Project
+        } else {
+            self.location
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -93,11 +121,25 @@ pub struct SetArgs {
     /// Value to write. Stored verbatim after `key=`.
     pub value: String,
 
+    /// Shortcut for `--location project`.
+    #[arg(long, conflicts_with = "location")]
+    pub local: bool,
+
     /// Which `.npmrc` file to write to.
     ///
     /// Defaults to `user`.
     #[arg(long, value_enum, default_value_t = Location::User)]
     pub location: Location,
+}
+
+impl SetArgs {
+    fn effective_location(&self) -> Location {
+        if self.local {
+            Location::Project
+        } else {
+            self.location
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -119,6 +161,13 @@ pub struct ListArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// Shortcut for `--location project`.
+    ///
+    /// Conflicts with `--all` since `--all` only makes sense against
+    /// the merged view — see the `--all` docs for why.
+    #[arg(long, conflicts_with_all = ["location", "all"])]
+    pub local: bool,
+
     /// Which `.npmrc` file(s) to list.
     ///
     /// `merged` (default) walks `~/.npmrc` then the project's
@@ -126,6 +175,16 @@ pub struct ListArgs {
     /// reads config.
     #[arg(long, value_enum, default_value_t = ListLocation::Merged)]
     pub location: ListLocation,
+}
+
+impl ListArgs {
+    fn effective_location(&self) -> ListLocation {
+        if self.local {
+            ListLocation::Project
+        } else {
+            self.location
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -233,7 +292,7 @@ pub fn get(args: GetArgs) -> miette::Result<()> {
     // exist so callers can scope the lookup to a single file (e.g. to
     // answer "is this key set at the project level?") — dispatching
     // per-location here matches what `list` does.
-    let entries: Vec<(String, String)> = match args.location {
+    let entries: Vec<(String, String)> = match args.effective_location() {
         ListLocation::Merged => read_merged(&cwd)?,
         ListLocation::User | ListLocation::Global => read_single(&user_npmrc_path()?)?,
         ListLocation::Project => read_single(&cwd.join(".npmrc"))?,
@@ -261,7 +320,7 @@ pub fn get(args: GetArgs) -> miette::Result<()> {
 pub fn set(args: SetArgs) -> miette::Result<()> {
     let aliases = resolve_aliases(&args.key);
     let write_key = preferred_write_key(&args.key, &aliases);
-    let path = args.location.path()?;
+    let path = args.effective_location().path()?;
     let mut edit = NpmrcEdit::load(&path)?;
     // Remove every known alias before writing so that a prior
     // `auto-install-peers=false` doesn't linger after the user runs
@@ -279,7 +338,7 @@ pub fn set(args: SetArgs) -> miette::Result<()> {
 
 fn delete(args: KeyArgs) -> miette::Result<()> {
     let aliases = resolve_aliases(&args.key);
-    let path = args.location.path()?;
+    let path = args.effective_location().path()?;
     if !path.exists() {
         return Err(miette!("no .npmrc at {}", path.display()));
     }
@@ -303,13 +362,14 @@ fn list(args: ListArgs) -> miette::Result<()> {
     // location, a key set in the *other* file looks "unset" to this
     // command and we'd print its default alongside a real value, which
     // is misleading.
-    if args.all && !matches!(args.location, ListLocation::Merged) {
+    let location = args.effective_location();
+    if args.all && !matches!(location, ListLocation::Merged) {
         return Err(miette!(
             "--all is only supported with --location merged (the default)"
         ));
     }
     let cwd = crate::dirs::project_root_or_cwd()?;
-    let entries: Vec<(String, String)> = match args.location {
+    let entries: Vec<(String, String)> = match location {
         ListLocation::Merged => read_merged(&cwd)?,
         ListLocation::User | ListLocation::Global => read_single(&user_npmrc_path()?)?,
         ListLocation::Project => read_single(&cwd.join(".npmrc"))?,

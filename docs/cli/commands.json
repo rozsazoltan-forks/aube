@@ -731,7 +731,7 @@
               "config",
               "delete"
             ],
-            "usage": "config delete [--location <LOCATION>] <KEY>",
+            "usage": "config delete [--local] [--location <LOCATION>] <KEY>",
             "subcommands": {},
             "args": [
               {
@@ -746,6 +746,18 @@
               }
             ],
             "flags": [
+              {
+                "name": "local",
+                "usage": "--local",
+                "help": "Shortcut for `--location project`",
+                "help_first_line": "Shortcut for `--location project`",
+                "short": [],
+                "long": [
+                  "local"
+                ],
+                "hide": false,
+                "global": false
+              },
               {
                 "name": "location",
                 "usage": "--location <LOCATION>",
@@ -794,7 +806,7 @@
               "config",
               "get"
             ],
-            "usage": "config get [--json] [--location <LOCATION>] <KEY>",
+            "usage": "config get [FLAGS] <KEY>",
             "subcommands": {},
             "args": [
               {
@@ -818,6 +830,18 @@
                 "short": [],
                 "long": [
                   "json"
+                ],
+                "hide": false,
+                "global": false
+              },
+              {
+                "name": "local",
+                "usage": "--local",
+                "help": "Shortcut for `--location project`",
+                "help_first_line": "Shortcut for `--location project`",
+                "short": [],
+                "long": [
+                  "local"
                 ],
                 "hide": false,
                 "global": false
@@ -898,6 +922,19 @@
                 "global": false
               },
               {
+                "name": "local",
+                "usage": "--local",
+                "help": "Shortcut for `--location project`",
+                "help_long": "Shortcut for `--location project`.\n\nConflicts with `--all` since `--all` only makes sense against the merged view — see the `--all` docs for why.",
+                "help_first_line": "Shortcut for `--location project`",
+                "short": [],
+                "long": [
+                  "local"
+                ],
+                "hide": false,
+                "global": false
+              },
+              {
                 "name": "location",
                 "usage": "--location <LOCATION>",
                 "help": "Which `.npmrc` file(s) to list",
@@ -944,7 +981,7 @@
               "config",
               "set"
             ],
-            "usage": "config set [--location <LOCATION>] <KEY> <VALUE>",
+            "usage": "config set [--local] [--location <LOCATION>] <KEY> <VALUE>",
             "subcommands": {},
             "args": [
               {
@@ -967,6 +1004,18 @@
               }
             ],
             "flags": [
+              {
+                "name": "local",
+                "usage": "--local",
+                "help": "Shortcut for `--location project`",
+                "help_first_line": "Shortcut for `--location project`",
+                "short": [],
+                "long": [
+                  "local"
+                ],
+                "hide": false,
+                "global": false
+              },
               {
                 "name": "location",
                 "usage": "--location <LOCATION>",
@@ -1724,7 +1773,7 @@
         "full_cmd": [
           "get"
         ],
-        "usage": "get [--json] [--location <LOCATION>] <KEY>",
+        "usage": "get [FLAGS] <KEY>",
         "subcommands": {},
         "args": [
           {
@@ -1748,6 +1797,18 @@
             "short": [],
             "long": [
               "json"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "local",
+            "usage": "--local",
+            "help": "Shortcut for `--location project`",
+            "help_first_line": "Shortcut for `--location project`",
+            "short": [],
+            "long": [
+              "local"
             ],
             "hide": false,
             "global": false
@@ -4186,7 +4247,7 @@
         "full_cmd": [
           "set"
         ],
-        "usage": "set [--location <LOCATION>] <KEY> <VALUE>",
+        "usage": "set [--local] [--location <LOCATION>] <KEY> <VALUE>",
         "subcommands": {},
         "args": [
           {
@@ -4209,6 +4270,18 @@
           }
         ],
         "flags": [
+          {
+            "name": "local",
+            "usage": "--local",
+            "help": "Shortcut for `--location project`",
+            "help_first_line": "Shortcut for `--location project`",
+            "short": [],
+            "long": [
+              "local"
+            ],
+            "hide": false,
+            "global": false
+          },
           {
             "name": "location",
             "usage": "--location <LOCATION>",

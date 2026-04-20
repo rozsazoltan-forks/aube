@@ -20,6 +20,12 @@ Emit all entries as a JSON object keyed by setting name, matching `pnpm config l
 
 Honors `--all` and `--location` the same way the default text output does.
 
+### `--local`
+
+Shortcut for `--location project`.
+
+Conflicts with `--all` since `--all` only makes sense against the merged view — see the `--all` docs for why.
+
 ### `--location <LOCATION>`
 
 Which `.npmrc` file(s) to list.
