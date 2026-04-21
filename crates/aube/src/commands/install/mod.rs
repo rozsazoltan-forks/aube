@@ -3612,6 +3612,12 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
         prefer_symlinked_executables,
     };
     if !virtual_store_only {
+        // Computed once up front: scans the packages map (~1350 entries
+        // on the vlt `large` fixture) to see if any carry `bin` info.
+        // pnpm/bun/npm parsers and fresh resolves populate `bin`;
+        // yarn-classic leaves it empty. The bin-linking fast path
+        // trusts empty `bin` as "no bins" only when this flag is set.
+        let has_bin_metadata = graph_for_link.has_bin_metadata();
         link_bins(
             &cwd,
             &modules_dir_name,
@@ -3620,6 +3626,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             virtual_store_dir_max_length,
             placements_ref,
             shim_opts,
+            has_bin_metadata,
         )?;
         if has_workspace {
             for (importer_path, deps) in &graph_for_link.importers {
@@ -3649,6 +3656,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                         virtual_store_dir_max_length,
                         placements_ref,
                         shim_opts,
+                        has_bin_metadata,
                     )?;
                 }
             }
@@ -3659,6 +3667,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             virtual_store_dir_max_length,
             placements_ref,
             shim_opts,
+            has_bin_metadata,
         )?;
         tracing::debug!("phase:link_bins {:.1?}", phase_start.elapsed());
     }
@@ -4198,6 +4207,7 @@ fn link_bins_for_dep(
     virtual_store_dir_max_length: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
     shim_opts: aube_linker::BinShimOptions,
+    has_bin_metadata: bool,
 ) -> miette::Result<()> {
     let pkg_dir = materialized_pkg_dir(
         aube_dir,
@@ -4206,6 +4216,22 @@ fn link_bins_for_dep(
         virtual_store_dir_max_length,
         placements,
     );
+    // Fast path: when the lockfile carries bin metadata and says this
+    // package ships none, skip the package.json read + JSON parse.
+    // 95%+ of a typical graph falls into this bucket; the saving
+    // scales with every bin-linking caller (root, per-dep,
+    // per-workspace). `local_source` packages (file:/link:) bypass
+    // the lockfile's bin info so we still consult their on-disk
+    // manifest. Bundled dependencies contribute bins from child
+    // tarballs regardless of the parent's own `bin` field, so
+    // `link_bundled_bins` runs unconditionally below.
+    let skip_bin_read = has_bin_metadata
+        && graph
+            .get_package(dep_path)
+            .is_some_and(|p| p.bin.is_empty() && p.local_source.is_none());
+    if skip_bin_read {
+        return link_bundled_bins(bin_dir, &pkg_dir, graph, dep_path, shim_opts);
+    }
     if let Some(pkg_json) = read_materialized_pkg_json(
         aube_dir,
         dep_path,
@@ -4240,6 +4266,7 @@ fn link_bins_for_dep(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn link_bins(
     project_dir: &std::path::Path,
     modules_dir_name: &str,
@@ -4248,6 +4275,7 @@ fn link_bins(
     virtual_store_dir_max_length: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
     shim_opts: aube_linker::BinShimOptions,
+    has_bin_metadata: bool,
 ) -> miette::Result<()> {
     let bin_dir = project_dir.join(modules_dir_name).join(".bin");
     std::fs::create_dir_all(&bin_dir).into_diagnostic()?;
@@ -4262,6 +4290,7 @@ fn link_bins(
             virtual_store_dir_max_length,
             placements,
             shim_opts,
+            has_bin_metadata,
         )?;
     }
 
@@ -4289,12 +4318,40 @@ pub(crate) fn link_dep_bins(
     virtual_store_dir_max_length: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
     shim_opts: aube_linker::BinShimOptions,
+    has_bin_metadata: bool,
 ) -> miette::Result<()> {
     if placements.is_some() {
         // Hoisted — skip. See function doc.
         return Ok(());
     }
     for (dep_path, pkg) in &graph.packages {
+        if pkg.dependencies.is_empty() {
+            continue;
+        }
+        // Fast path: when lockfile bin metadata is trustworthy and
+        // none of this package's children declare bins, the whole dep
+        // contributes nothing to a local `.bin/`. Skipping here avoids
+        // both the `pkg_dir.exists()` stat and the per-child
+        // `link_bins_for_dep` dispatch on ~95% of entries in a typical
+        // graph. Escape hatches: a child with `local_source`
+        // (file:/link:) bypasses the lockfile's bin map; a child with
+        // its *own* `bundled_dependencies` can ship bins from its
+        // nested tarballs that `link_bins_for_dep` -> `link_bundled_bins`
+        // surfaces into the parent's `.bin/`, so we must dispatch
+        // normally for it.
+        if has_bin_metadata
+            && pkg.bundled_dependencies.is_empty()
+            && pkg.dependencies.iter().all(|(child_name, child_version)| {
+                let child_dep_path = format!("{child_name}@{child_version}");
+                graph.get_package(&child_dep_path).is_some_and(|c| {
+                    c.bin.is_empty()
+                        && c.local_source.is_none()
+                        && c.bundled_dependencies.is_empty()
+                })
+            })
+        {
+            continue;
+        }
         let pkg_dir = materialized_pkg_dir(
             aube_dir,
             dep_path,
@@ -4306,9 +4363,6 @@ pub(crate) fn link_dep_bins(
             // Filtered by optional / platform guards, or a staging
             // hiccup. Skipping avoids blowing up the whole install on
             // a dep that was never materialized.
-            continue;
-        }
-        if pkg.dependencies.is_empty() {
             continue;
         }
         let dep_modules_dir = dep_modules_dir_for(&pkg_dir, &pkg.name);
@@ -4340,6 +4394,7 @@ pub(crate) fn link_dep_bins(
                 virtual_store_dir_max_length,
                 placements,
                 shim_opts,
+                has_bin_metadata,
             )?;
         }
     }
