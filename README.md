@@ -18,9 +18,6 @@
   <strong><a href="https://aube.en.dev">Read the docs</a></strong>
 </p>
 
-> [!WARNING]
-> aube is beta software. It aims for compatibility with pnpm v11, but it has not been tested across many projects yet.
-
 ## Why Try It
 
 **[Fast installs](https://aube.en.dev/benchmarks).** Warm CI is about 7x faster than pnpm and 3x faster than Bun in the current benchmarks. Across the fixture set, aube runs up to ~22x faster than pnpm and up to 3x faster than Bun.
