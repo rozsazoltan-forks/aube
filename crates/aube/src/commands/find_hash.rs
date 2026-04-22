@@ -112,34 +112,63 @@ pub async fn run(args: FindHashArgs) -> miette::Result<()> {
     Ok(())
 }
 
-/// Walk every `*.json` file under the cache dir, parse it as a
-/// `PackageIndex`, and collect every entry whose `hex_hash` matches
-/// `target_hex`. Cache entries that fail to parse or can't be decoded
+/// Walk every `*.json` file in the cache dir — both at the root
+/// (integrity-less entries) and one level down under `<integrity-hex>/`
+/// subdirs (integrity-keyed entries) — parse each as a `PackageIndex`,
+/// and collect every entry whose `hex_hash` matches `target_hex`.
+/// Cache entries that fail to parse or whose filename can't be decoded
 /// into `{name}@{version}` are skipped silently — the cache is a
 /// best-effort artifact, not a source of truth.
 fn scan_index_dir(index_dir: &std::path::Path, target_hex: &str) -> miette::Result<Vec<Match>> {
     let mut matches: Vec<Match> = Vec::new();
+    scan_one_level(index_dir, target_hex, &mut matches)?;
 
+    // Recurse exactly one level deep for the `<integrity-hex>/` subdirs.
+    // The layout is flat by design; anything deeper would be foreign.
     let entries = std::fs::read_dir(index_dir)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read {}: {e}", index_dir.display()))?;
-
     for entry in entries {
         let entry = entry
             .into_diagnostic()
             .map_err(|e| miette!("failed to read directory entry: {e}"))?;
         let path = entry.path();
+        if path.is_dir() {
+            scan_one_level(&path, target_hex, &mut matches)?;
+        }
+    }
+
+    matches.sort_by(|a, b| (&a.name, &a.version, &a.path).cmp(&(&b.name, &b.version, &b.path)));
+    Ok(matches)
+}
+
+fn scan_one_level(
+    dir: &std::path::Path,
+    target_hex: &str,
+    matches: &mut Vec<Match>,
+) -> miette::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(miette!("failed to read {}: {e}", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry
+            .into_diagnostic()
+            .map_err(|e| miette!("failed to read directory entry: {e}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
         let Some((name, version)) = split_stem(stem) else {
             continue;
         };
-
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -148,7 +177,6 @@ fn scan_index_dir(index_dir: &std::path::Path, target_hex: &str) -> miette::Resu
         else {
             continue;
         };
-
         for (rel_path, file) in index {
             if file.hex_hash == target_hex {
                 matches.push(Match {
@@ -159,9 +187,7 @@ fn scan_index_dir(index_dir: &std::path::Path, target_hex: &str) -> miette::Resu
             }
         }
     }
-
-    matches.sort_by(|a, b| (&a.name, &a.version, &a.path).cmp(&(&b.name, &b.version, &b.path)));
-    Ok(matches)
+    Ok(())
 }
 
 /// Reverse the `{safe_name}@{version}.json` naming scheme used by
@@ -181,6 +207,9 @@ fn scan_index_dir(index_dir: &std::path::Path, target_hex: &str) -> miette::Resu
 /// `@foo__bar/baz` — is still ambiguous vs. `@foo/bar__baz` and
 /// decodes to the latter. That's a limitation of the underlying
 /// `save_index` encoding, not fixable in the reverse direction alone.)
+///
+/// Integrity (when present) lives in the parent directory name, not
+/// the filename, so no suffix stripping is needed here.
 fn split_stem(stem: &str) -> Option<(String, String)> {
     let at = stem.rfind('@')?;
     if at == 0 {
@@ -265,6 +294,21 @@ mod tests {
     }
 
     #[test]
+    fn split_stem_preserves_build_metadata_in_version() {
+        // Integrity moved out of the filename into a parent subdir,
+        // so no part of the stem ever needs stripping. Build
+        // metadata in the version passes through verbatim.
+        assert_eq!(
+            split_stem("foo@1.0.0+build123"),
+            Some(("foo".into(), "1.0.0+build123".into()))
+        );
+        assert_eq!(
+            split_stem("foo@1.0.0+deadbeefdeadbeef"),
+            Some(("foo".into(), "1.0.0+deadbeefdeadbeef".into()))
+        );
+    }
+
+    #[test]
     fn scan_index_dir_finds_a_match() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
@@ -334,5 +378,39 @@ mod tests {
 
         let matches = scan_index_dir(dir, "deadbeef").unwrap();
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn scan_index_dir_descends_into_integrity_subdirs() {
+        // Integrity-keyed entries live under `<16 hex>/<name>@<ver>.json`.
+        // scan_index_dir must walk those too, not just the root.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        let target = "deadbeef";
+        let index = serde_json::json!({
+            "lib.js": { "hex_hash": target, "store_path": "/tmp/x", "executable": false }
+        });
+
+        // Integrity-keyed: under a hex subdir.
+        let subdir = dir.join("aabbccddeeff0011");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(
+            subdir.join("lodash@4.17.21.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+
+        // Integrity-less: at the root.
+        std::fs::write(
+            dir.join("other-pkg@1.0.0.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+
+        let matches = scan_index_dir(dir, target).unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].name, "lodash");
+        assert_eq!(matches[1].name, "other-pkg");
     }
 }

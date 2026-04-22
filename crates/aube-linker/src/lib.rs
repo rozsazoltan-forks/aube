@@ -1072,7 +1072,11 @@ impl Linker {
                                 None => {
                                     owned_index = self
                                         .store
-                                        .load_index(pkg.registry_name(), &pkg.version)
+                                        .load_index(
+                                            pkg.registry_name(),
+                                            &pkg.version,
+                                            pkg.integrity.as_deref(),
+                                        )
                                         .ok_or_else(|| {
                                             Error::MissingPackageIndex(dep_path.to_string())
                                         })?;
@@ -1140,7 +1144,7 @@ impl Linker {
                     None => {
                         owned_index = self
                             .store
-                            .load_index(pkg.registry_name(), &pkg.version)
+                            .load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
                             .ok_or_else(|| Error::MissingPackageIndex(dep_path.to_string()))?;
                         &owned_index
                     }
@@ -1466,7 +1470,11 @@ impl Linker {
                                 None => {
                                     owned_index = self
                                         .store
-                                        .load_index(pkg.registry_name(), &pkg.version)
+                                        .load_index(
+                                            pkg.registry_name(),
+                                            &pkg.version,
+                                            pkg.integrity.as_deref(),
+                                        )
                                         .ok_or_else(|| {
                                             Error::MissingPackageIndex(dep_path.to_string())
                                         })?;
@@ -1515,7 +1523,7 @@ impl Linker {
                     None => {
                         owned_index = self
                             .store
-                            .load_index(pkg.registry_name(), &pkg.version)
+                            .load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
                             .ok_or_else(|| Error::MissingPackageIndex(dep_path.to_string()))?;
                         &owned_index
                     }
