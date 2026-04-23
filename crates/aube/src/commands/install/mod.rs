@@ -2100,11 +2100,17 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 .map_err(miette::Report::new)
                 .wrap_err_with(|| format!("failed to read {}/package.json", pkg_dir.display()))?;
 
+            // Importer key uses forward slash. pnpm lockfile convention
+            // is always `/`. `workspace_importer_path` also returns `/`,
+            // so a Windows `\` key here would never match filter lookups
+            // and silently drop the importer from `--filter` installs.
+            // Second risk: Linux CI reading a Windows-written lockfile
+            // sees unknown keys and forces a re-resolve drift.
             let rel_path = pkg_dir
                 .strip_prefix(&cwd)
                 .unwrap_or(pkg_dir)
                 .to_string_lossy()
-                .to_string();
+                .replace('\\', "/");
 
             if let Some(ref name) = pkg_manifest.name {
                 // Workspace members MUST carry a version. Old code
@@ -3910,8 +3916,15 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
     //    Skipped under `virtualStoreOnly` — the state sidecar is
     //    keyed off a materialized node_modules tree that doesn't
     //    exist, and writing it would lie on the next auto-install
-    //    freshness check.
-    if !virtual_store_only {
+    //    freshness check. Same skip when a workspace filter scoped the
+    //    run to a subset of importers. State hash is derived from full
+    //    manifest + lockfile inputs, so writing it after a partial
+    //    materialize would let the next unfiltered `aube install` hit
+    //    the warm path while unfiltered importers are still empty.
+    //    Observed via `aube add <pkg> --filter <ws>` leaving the new
+    //    dep unmaterialized.
+    let filtered_install = !opts.workspace_filter.is_empty() || opts.dep_selection.is_filtered();
+    if !virtual_store_only && !filtered_install {
         // Fingerprint every package in the final graph so the next
         // install can diff and skip unchanged entries. Missing or
         // stale fingerprints fall back to a full install on the
@@ -4721,17 +4734,38 @@ fn create_bin_link(
     target: &std::path::Path,
     shim_opts: aube_linker::BinShimOptions,
 ) -> miette::Result<()> {
-    // `link_dep_bins` intentionally skips the eager `create_dir_all`
-    // on per-dep `.bin/` so deps whose children contribute nothing
-    // don't leave empty dirs behind. Materialize on demand here — the
-    // first shim write is the signal that we actually need the dir.
-    // Idempotent and cheap on already-existing paths, so the other
-    // callers (root / workspace bin dirs, which still pre-create) pay
-    // at most one redundant stat per shim.
-    std::fs::create_dir_all(bin_dir)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to create bin directory {}", bin_dir.display()))?;
-    aube_linker::create_bin_shim(bin_dir, name, target, shim_opts)
+    // `link_dep_bins` skips eager `create_dir_all` on per-dep `.bin/`.
+    // Deps whose children ship no bins stay empty on disk. First shim
+    // write materializes the dir on demand.
+    //
+    // Windows `CreateDirectoryW` returns `ERROR_ALREADY_EXISTS` (os 183)
+    // when the leaf sits behind a junction in the path, even when the
+    // leaf is absent. The isolated layout's `.aube/<dep_path>` is a
+    // junction into the global virtual store, so every `.bin/` under it
+    // hits the quirk. Fix: canonicalize the parent, strip the `\\?\`
+    // UNC prefix (which trips its own CreateDirectoryW quirk, os 123),
+    // create the leaf on the plain drive path. No-op on Unix.
+    #[cfg(windows)]
+    let target_for_mkdir_owned = bin_dir.parent().and_then(|parent| {
+        let leaf = bin_dir.file_name()?;
+        let canon = std::fs::canonicalize(parent).ok()?;
+        let s = canon.to_string_lossy();
+        let cleaned = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        Some(std::path::PathBuf::from(cleaned).join(leaf))
+    });
+    #[cfg(windows)]
+    let target_for_mkdir: &std::path::Path = target_for_mkdir_owned.as_deref().unwrap_or(bin_dir);
+    #[cfg(not(windows))]
+    let target_for_mkdir = bin_dir;
+    if let Err(e) = std::fs::create_dir_all(target_for_mkdir) {
+        let tolerated = e.kind() == std::io::ErrorKind::AlreadyExists && target_for_mkdir.is_dir();
+        if !tolerated {
+            return Err(e)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("failed to create bin directory {}", bin_dir.display()));
+        }
+    }
+    aube_linker::create_bin_shim(target_for_mkdir, name, target, shim_opts)
         .into_diagnostic()
         .wrap_err_with(|| {
             format!(
