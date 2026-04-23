@@ -13,7 +13,7 @@ const STORAGE_KEY = "jdx-banner-dismissed";
 
 export function initBanner(): void {
   if (typeof window === "undefined") return;
-  fetch(ENDPOINT, { cache: "no-cache" })
+  fetch(ENDPOINT)
     .then((r) => (r.ok ? (r.json() as Promise<BannerData>) : null))
     .then((b) => {
       if (!b || !b.enabled) return;
@@ -46,7 +46,7 @@ function render(b: BannerData): void {
     const a = document.createElement("a");
     a.href = b.link;
     a.target = "_blank";
-    a.rel = "noopener noreferrer";
+    a.rel = "noopener";
     a.textContent = b.linkText || "Learn more";
     el.appendChild(a);
   }
