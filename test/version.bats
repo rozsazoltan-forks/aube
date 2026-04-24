@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2030,SC2031
 
 setup() {
 	load 'test_helper/common_setup'
@@ -140,4 +141,106 @@ _write_pkg() {
 	assert_output "init"
 	run git tag --list
 	assert_output ""
+}
+
+@test "aube version runs preversion, version, postversion in order" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "version-hooks",
+		  "version": "1.0.0",
+		  "scripts": {
+		    "preversion": "echo preversion >>$HOOK_LOG",
+		    "version": "echo version >>$HOOK_LOG",
+		    "postversion": "echo postversion >>$HOOK_LOG"
+		  }
+		}
+	EOF
+
+	export HOOK_LOG="$PWD/hooks.log"
+	: >"$HOOK_LOG"
+
+	run aube version patch --no-git-tag-version
+	assert_success
+	assert_output "v1.0.1"
+
+	run cat "$HOOK_LOG"
+	assert_success
+	assert_line --index 0 "preversion"
+	assert_line --index 1 "version"
+	assert_line --index 2 "postversion"
+}
+
+@test "aube version --ignore-scripts skips lifecycle hooks" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "version-hooks",
+		  "version": "1.0.0",
+		  "scripts": {
+		    "preversion": "echo preversion >>$HOOK_LOG",
+		    "version": "echo version >>$HOOK_LOG",
+		    "postversion": "echo postversion >>$HOOK_LOG"
+		  }
+		}
+	EOF
+
+	export HOOK_LOG="$PWD/hooks.log"
+	: >"$HOOK_LOG"
+
+	run aube version patch --no-git-tag-version --ignore-scripts
+	assert_success
+
+	run cat "$HOOK_LOG"
+	assert_success
+	assert_output ""
+}
+
+@test "aube version preserves manifest edits made by preversion" {
+	# Regression: `replace_version` used to operate on the pre-hook
+	# snapshot of `package.json`, so any edits `preversion` made to
+	# other fields (here: stripping a `draft` flag) were silently
+	# overwritten by the atomic write of the new version.
+	cat >package.json <<-'EOF'
+		{
+		  "name": "version-mutates",
+		  "version": "1.0.0",
+		  "draft": true,
+		  "scripts": {
+		    "preversion": "node ./strip-draft.mjs"
+		  }
+		}
+	EOF
+	cat >strip-draft.mjs <<'NODE'
+import fs from 'node:fs';
+const m = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+delete m.draft;
+fs.writeFileSync('package.json', JSON.stringify(m, null, 2));
+NODE
+
+	run aube version patch --no-git-tag-version
+	assert_success
+	assert_output "v1.0.1"
+
+	# Both the preversion edit AND the version bump must survive.
+	run cat package.json
+	assert_output --partial '"version": "1.0.1"'
+	refute_output --partial '"draft"'
+}
+
+@test "aube version aborts bump when preversion fails" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "version-hooks",
+		  "version": "1.0.0",
+		  "scripts": {
+		    "preversion": "exit 7"
+		  }
+		}
+	EOF
+
+	run aube version patch --no-git-tag-version
+	assert_failure
+
+	# Manifest should be untouched since preversion fires BEFORE the edit.
+	run cat package.json
+	assert_output --partial '"version": "1.0.0"'
 }

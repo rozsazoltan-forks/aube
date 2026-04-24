@@ -24,6 +24,10 @@ pub struct VersionArgs {
     #[arg(long)]
     pub allow_same_version: bool,
 
+    /// Skip `preversion` / `version` / `postversion` lifecycle scripts.
+    #[arg(long)]
+    pub ignore_scripts: bool,
+
     /// Emit the result as JSON instead of `v<version>` text.
     #[arg(long)]
     pub json: bool,
@@ -81,11 +85,41 @@ pub async fn run(args: VersionArgs) -> miette::Result<()> {
         ));
     }
 
+    // npm/pnpm order: `preversion` fires BEFORE the manifest is
+    // rewritten so the script sees the outgoing version and can
+    // abort the bump (e.g. "refuse to bump while tests are red"). We
+    // re-read the manifest between each hook so `npm_package_version`
+    // reflects the right state of the world — preversion sees the
+    // old version, version/postversion see the new one.
+    if !args.ignore_scripts {
+        let manifest = super::pack::read_root_manifest(&cwd)?;
+        super::pack::run_root_lifecycle_script(&cwd, &manifest, "preversion").await?;
+    }
+
+    // Re-read the raw file *after* preversion: a common idiom is
+    // `preversion: 'npm test && git add CHANGELOG.md'`, but hooks
+    // can also mutate the manifest directly (formatting, touching
+    // related fields, …). Using the pre-hook `raw` for
+    // `replace_version` would silently discard those edits on the
+    // atomic write.
+    let raw = std::fs::read_to_string(&manifest_path)
+        .into_diagnostic()
+        .wrap_err("failed to read package.json")?;
+
     let updated = replace_version(&raw, &new_version)
         .ok_or_else(|| miette!("failed to locate version string in package.json"))?;
     aube_util::fs_atomic::atomic_write(&manifest_path, updated.as_bytes())
         .into_diagnostic()
         .wrap_err("failed to write package.json")?;
+
+    // `version` fires AFTER the manifest edit but BEFORE the git
+    // commit. Scripts usually regenerate derived files here (e.g.
+    // `version: 'git add CHANGELOG.md'`) so they're included in the
+    // version tag's tree. Matches npm docs.
+    if !args.ignore_scripts {
+        let manifest = super::pack::read_root_manifest(&cwd)?;
+        super::pack::run_root_lifecycle_script(&cwd, &manifest, "version").await?;
+    }
 
     // Skip git ops when the version hasn't actually changed (e.g.
     // `--allow-same-version` bumping to the current version) — otherwise
@@ -105,6 +139,16 @@ pub async fn run(args: VersionArgs) -> miette::Result<()> {
             args.no_commit_hooks,
             args.sign_git_tag,
         )?;
+    }
+
+    // `postversion` fires last — after the git commit + tag (if any;
+    // `--no-git-tag-version` or a clean-same-version run skips that
+    // step, in which case postversion just fires after the manifest
+    // write). Common idiom when tagging is enabled is
+    // `postversion: 'git push && git push --tags'`.
+    if !args.ignore_scripts {
+        let manifest = super::pack::read_root_manifest(&cwd)?;
+        super::pack::run_root_lifecycle_script(&cwd, &manifest, "postversion").await?;
     }
 
     if args.json {

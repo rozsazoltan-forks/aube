@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2030,SC2031
 
 setup() {
 	load 'test_helper/common_setup'
@@ -6,6 +7,13 @@ setup() {
 }
 
 teardown() {
+	# Safety net: every test in this file that spawns a background
+	# mock registry is expected to call `_stop_publish_server`
+	# inline, but a failing assertion between _start and _stop would
+	# leak the node process and keep the CI shard alive forever (the
+	# http.createServer event loop never exits on its own). Always
+	# kill here as a backstop.
+	_stop_publish_server
 	_common_teardown
 }
 
@@ -260,6 +268,174 @@ _stop_publish_server() {
 	run grep -c "^/publish-smoke " publish-server-put.log
 	assert_success
 	[ "$output" = "1" ]
+}
+
+@test "aube publish --dry-run runs prepublishOnly, prepublish, prepack, prepare, postpack" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "publish-hooks",
+		  "version": "0.1.0",
+		  "main": "index.js",
+		  "files": ["index.js"],
+		  "scripts": {
+		    "prepublishOnly": "echo prepublishOnly >>$HOOK_LOG",
+		    "prepublish": "echo prepublish >>$HOOK_LOG",
+		    "prepack": "echo prepack >>$HOOK_LOG",
+		    "prepare": "echo prepare >>$HOOK_LOG",
+		    "postpack": "echo postpack >>$HOOK_LOG",
+		    "publish": "echo publish >>$HOOK_LOG",
+		    "postpublish": "echo postpublish >>$HOOK_LOG"
+		  }
+		}
+	EOF
+	echo "module.exports = 1" >index.js
+
+	export HOOK_LOG="$PWD/hooks.log"
+	: >"$HOOK_LOG"
+
+	run aube publish --dry-run --registry=https://r.example.com/
+	assert_success
+
+	# Dry-run: pre-pack chain fires, post-upload hooks don't.
+	run cat "$HOOK_LOG"
+	assert_success
+	assert_line --index 0 "prepublishOnly"
+	assert_line --index 1 "prepublish"
+	assert_line --index 2 "prepack"
+	assert_line --index 3 "prepare"
+	assert_line --index 4 "postpack"
+	refute_line "publish"
+	refute_line "postpublish"
+}
+
+@test "aube publish --dry-run --ignore-scripts skips lifecycle hooks" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "publish-hooks",
+		  "version": "0.1.0",
+		  "main": "index.js",
+		  "files": ["index.js"],
+		  "scripts": {
+		    "prepublishOnly": "echo prepublishOnly >>$HOOK_LOG",
+		    "prepack": "echo prepack >>$HOOK_LOG",
+		    "prepare": "echo prepare >>$HOOK_LOG",
+		    "postpack": "echo postpack >>$HOOK_LOG"
+		  }
+		}
+	EOF
+	echo "module.exports = 1" >index.js
+
+	export HOOK_LOG="$PWD/hooks.log"
+	: >"$HOOK_LOG"
+
+	run aube publish --dry-run --ignore-scripts --registry=https://r.example.com/
+	assert_success
+
+	run cat "$HOOK_LOG"
+	assert_success
+	assert_output ""
+}
+
+@test "aube publish --dry-run aborts when prepublishOnly fails" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "publish-hooks",
+		  "version": "0.1.0",
+		  "main": "index.js",
+		  "files": ["index.js"],
+		  "scripts": {
+		    "prepublishOnly": "exit 5"
+		  }
+		}
+	EOF
+	echo "module.exports = 1" >index.js
+
+	run aube publish --dry-run --registry=https://r.example.com/
+	assert_failure
+}
+
+@test "aube publish re-reads package.json after pre-pack hooks so registry metadata matches tarball" {
+	# Regression test for Cursor Bugbot issue: if a `prepublishOnly`
+	# script mutates package.json (e.g. stamping a git SHA into the
+	# version, stripping devDependencies), `build_publish_body` must
+	# see the post-hook manifest so `versions.<v>` metadata agrees
+	# with what's in the tarball. Previously we serialized the
+	# pre-hook snapshot and consumers saw a mismatch.
+	cat >package.json <<-'EOF'
+		{
+		  "name": "publish-mutated",
+		  "version": "0.1.0",
+		  "main": "index.js",
+		  "files": ["index.js"],
+		  "devDependencies": {
+		    "should-be-stripped": "1.0.0"
+		  },
+		  "scripts": {
+		    "prepublishOnly": "node ./rewrite.mjs"
+		  }
+		}
+	EOF
+	echo "module.exports = 1" >index.js
+	cat >rewrite.mjs <<'NODE'
+import fs from 'node:fs';
+const m = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+delete m.devDependencies;
+m.publishedBy = 'prepublishOnly';
+fs.writeFileSync('package.json', JSON.stringify(m, null, 2));
+NODE
+
+	cat >record-server.mjs <<'NODE'
+import http from 'node:http';
+import fs from 'node:fs';
+
+const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/publish-mutated') {
+    res.statusCode = 404;
+    res.end('{}');
+    return;
+  }
+  if (req.method === 'PUT' && req.url === '/publish-mutated') {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      fs.writeFileSync('put-body.json', Buffer.concat(chunks));
+      res.statusCode = 201;
+      res.end('{"ok":true}');
+    });
+    return;
+  }
+  res.statusCode = 404;
+  res.end('{}');
+});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync('record-server-port', String(server.address().port));
+});
+NODE
+	# Use PUBLISH_SERVER_PID so teardown's `_stop_publish_server`
+	# safety net catches it if the test aborts early.
+	node record-server.mjs &
+	PUBLISH_SERVER_PID=$!
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		[ -f record-server-port ] && break
+		sleep 0.1
+	done
+	port="$(cat record-server-port)"
+	echo "//127.0.0.1:${port}/:_authToken=fake" >.npmrc
+
+	run aube publish --no-git-checks --registry "http://127.0.0.1:${port}/"
+	rc=$status
+	_stop_publish_server
+	[ "$rc" -eq 0 ]
+
+	# The PUT body's `versions["0.1.0"]` must reflect the post-hook
+	# manifest — `devDependencies` stripped, `publishedBy` added.
+	run jq -r '.versions."0.1.0".publishedBy' put-body.json
+	assert_success
+	assert_output "prepublishOnly"
+
+	run jq '.versions."0.1.0".devDependencies' put-body.json
+	assert_success
+	assert_output "null"
 }
 
 @test "aube publish --dry-run --json emits a pnpm-compatible array" {

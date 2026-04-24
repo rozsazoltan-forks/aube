@@ -66,12 +66,9 @@ pub struct PublishArgs {
     /// outright; Verdaccio and most private mirrors allow them.
     #[arg(long)]
     pub force: bool,
-    /// Skip `prepublishOnly` / `prepack` / `postpack` / `publish` /
-    /// `postpublish` lifecycle scripts for this publish.
-    ///
-    /// Accepted for pnpm parity; aube's publish path does not run
-    /// those scripts today, so this is a no-op kept for wrapper
-    /// compatibility.
+    /// Skip `prepublishOnly` / `prepublish` / `prepack` / `prepare` /
+    /// `postpack` / `publish` / `postpublish` lifecycle scripts for
+    /// this publish.
     #[arg(long)]
     pub ignore_scripts: bool,
     /// Emit the publish result as JSON: an array with one
@@ -112,7 +109,6 @@ pub async fn run(
     filter: aube_workspace::selector::EffectiveFilter,
     registry_override: Option<&str>,
 ) -> miette::Result<()> {
-    let _ = args.ignore_scripts; // parity no-op: aube's publish path doesn't run lifecycle scripts yet
     let cwd = crate::dirs::project_root()?;
 
     if !args.no_git_checks {
@@ -413,9 +409,13 @@ async fn publish_one(
         .to_string();
 
     if args.dry_run {
-        // Dry-run still builds the archive: the whole point is to show
-        // the user what *would* be uploaded, including the file list.
+        // Dry-run still runs the pre-publish chain so users can smoke-test
+        // their `prepublishOnly` / `prepack` / `prepare` scripts without
+        // hitting the registry, matching pnpm. `publish` / `postpublish`
+        // are skipped — nothing was actually uploaded.
+        run_publish_lifecycle_pre(pkg_dir, &manifest, args.ignore_scripts).await?;
         let archive = build_archive(pkg_dir)?;
+        super::pack::run_pack_lifecycle_post(pkg_dir, args.ignore_scripts).await?;
         // `--dry-run --provenance` is a common "does my CI actually have
         // OIDC wired up?" smoke test. Silently skipping the OIDC probe
         // here would give a false green light — so we run the ambient
@@ -461,11 +461,24 @@ async fn publish_one(
         ));
     }
 
-    // Build the tarball + publish body only now that we know we're
-    // actually going to PUT. For a re-run of `-r publish` where every
-    // package is already on the registry, the loop never reaches this
-    // point and the whole fanout is gzip-free.
+    // Lifecycle hooks + tarball build only happen now that we know
+    // we're actually going to PUT. For a re-run of `-r publish` where
+    // every package is already on the registry, the loop never reaches
+    // this point and the whole fanout is script-free and gzip-free.
+    run_publish_lifecycle_pre(pkg_dir, &manifest, args.ignore_scripts).await?;
     let archive = build_archive(pkg_dir)?;
+    super::pack::run_pack_lifecycle_post(pkg_dir, args.ignore_scripts).await?;
+
+    // Re-read the manifest *after* the pre-pack chain. Publish-time
+    // hooks often rewrite `package.json` on the fly — `clean-package`
+    // strips `devDependencies`, build tools inject `exports`, a
+    // `prepublishOnly` might stamp a git SHA into the version. The
+    // tarball always reflects the on-disk state (`build_archive`
+    // reads it fresh), so the registry-visible metadata at
+    // `versions.<v>.*` and the env seen by `publish` / `postpublish`
+    // must agree with it or consumers get a mismatch between
+    // `npm info` output and the tarball they actually download.
+    let manifest = super::pack::read_root_manifest(pkg_dir)?;
 
     // Sigstore signing is the one step here that can take seconds
     // (Fulcio + Rekor + optional TSA round-trips), so we do it *before*
@@ -490,8 +503,12 @@ async fn publish_one(
     // Without this, a first-time `@scope/pkg` publish with
     // `publishConfig.access=public` in package.json would fail with
     // 402 unless the user also passed `--access public` on every
-    // publish invocation.
-    let pc_access = publish_config
+    // publish invocation. Re-derive from the post-hook manifest so
+    // `prepublishOnly`-injected publishConfig entries are honored.
+    let pc_access = manifest
+        .extra
+        .get("publishConfig")
+        .and_then(|v| v.as_object())
         .and_then(|p| p.get("access"))
         .and_then(|v| v.as_str());
     let effective_access = args.access.as_deref().or(pc_access);
@@ -525,6 +542,8 @@ async fn publish_one(
         return Err(miette!("publish failed: {status}: {}", body.trim()));
     }
 
+    run_publish_lifecycle_post(pkg_dir, &manifest, args.ignore_scripts).await?;
+
     Ok(PublishOutcome {
         name,
         version,
@@ -532,6 +551,45 @@ async fn publish_one(
         archive: Some(archive),
         status: PublishStatus::Published,
     })
+}
+
+/// Pre-pack chain for publish: `prepublishOnly` → `prepublish` →
+/// `prepack` → `prepare`. Runs only for packages that are actually
+/// being uploaded — the "already on registry" skip path avoids all of
+/// this so `aube -r publish` remains idempotent. `prepublish` is
+/// deprecated by npm but pnpm still runs it on publish, so we match
+/// pnpm for the common case the discussion in #253 flagged. The
+/// manifest is threaded through so the whole chain shares a single
+/// parse of `package.json`.
+async fn run_publish_lifecycle_pre(
+    pkg_dir: &Path,
+    manifest: &PackageJson,
+    ignore_scripts: bool,
+) -> miette::Result<()> {
+    if ignore_scripts {
+        return Ok(());
+    }
+    super::pack::run_root_lifecycle_script(pkg_dir, manifest, "prepublishOnly").await?;
+    super::pack::run_root_lifecycle_script(pkg_dir, manifest, "prepublish").await?;
+    super::pack::run_root_lifecycle_script(pkg_dir, manifest, "prepack").await?;
+    super::pack::run_root_lifecycle_script(pkg_dir, manifest, "prepare").await?;
+    Ok(())
+}
+
+/// Post-upload chain for publish: `publish` → `postpublish`. These
+/// run only after a successful PUT — a non-2xx response short-circuits
+/// out before we get here, matching pnpm.
+async fn run_publish_lifecycle_post(
+    pkg_dir: &Path,
+    manifest: &PackageJson,
+    ignore_scripts: bool,
+) -> miette::Result<()> {
+    if ignore_scripts {
+        return Ok(());
+    }
+    super::pack::run_root_lifecycle_script(pkg_dir, manifest, "publish").await?;
+    super::pack::run_root_lifecycle_script(pkg_dir, manifest, "postpublish").await?;
+    Ok(())
 }
 
 /// GET `{registry}/{name}` and check whether `versions[version]` is
