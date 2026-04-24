@@ -504,6 +504,15 @@ pub struct FetchPolicy {
     /// this value (KiB/s). `0` disables the warning. As with
     /// `warn_timeout_ms`, we only warn — we never abort the transfer.
     pub min_speed_kibps: u64,
+    /// `packumentMaxBytes` — hard cap on a packument response body.
+    /// Primarily a hardening knob against hostile or misconfigured
+    /// registries. `0` disables the cap entirely (not recommended for
+    /// untrusted registries).
+    pub packument_max_bytes: u64,
+    /// `tarballMaxBytes` — hard cap on a tarball response body
+    /// (on-wire, still compressed). Same hardening role as
+    /// `packument_max_bytes`; `0` disables.
+    pub tarball_max_bytes: u64,
 }
 
 impl Default for FetchPolicy {
@@ -519,6 +528,9 @@ impl Default for FetchPolicy {
             retry_max_timeout_ms: 60_000,
             warn_timeout_ms: 10_000,
             min_speed_kibps: 50,
+            // Defaults match `settings.toml`.
+            packument_max_bytes: 200 << 20,
+            tarball_max_bytes: 1 << 30,
         }
     }
 }
@@ -537,6 +549,8 @@ impl FetchPolicy {
             retry_max_timeout_ms: aube_settings::resolved::fetch_retry_maxtimeout(ctx),
             warn_timeout_ms: aube_settings::resolved::fetch_warn_timeout_ms(ctx),
             min_speed_kibps: aube_settings::resolved::fetch_min_speed_ki_bps(ctx),
+            packument_max_bytes: aube_settings::resolved::packument_max_bytes(ctx),
+            tarball_max_bytes: aube_settings::resolved::tarball_max_bytes(ctx),
         }
     }
 
