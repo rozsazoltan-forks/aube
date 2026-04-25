@@ -60,7 +60,7 @@ support:
 
 commands:
   build: cargo build
-  test_unit: cargo test --release
+  test_unit: cargo test
   clippy: cargo clippy --all-targets -- -D warnings
   fmt_check: cargo fmt --check
   bats: mise run test:bats (needs Node.js 22 + GNU parallel)
@@ -75,14 +75,14 @@ release_profile:
 when_to_use_release:
   default: debug. `cargo build` / `cargo clippy` already produce the `target/debug/aube` binary that bats and local smoke tests exercise
   bats_binary: test/test_helper/common_setup.bash prepends `target/debug` to PATH. never `cargo build --release` to debug a bats failure — rebuild debug, which is already warm from clippy
-  allowed_release_uses[4]:
+  allowed_release_uses[3]:
     - profiling (samply, flamegraph, hyperfine) — optimizer-off numbers are meaningless
     - reproducing a perf bug only observable in release
     - benchmarks (mise run bench* always builds release via its own manifest)
-    - `cargo test --release` — .rules commands.test_unit mandates release because release is 3x+ slower to build but tests run 10x faster; one-time cost pays off across a full suite
-  forbidden[2]:
+  forbidden[3]:
     - rebuilding release "just to be safe" during iterative debug (1+ min cost vs 5s incremental debug)
     - shipping release-only asserts that don't exist in debug — keep invariants consistent across profiles
+    - `cargo test --release` — measured: release compile ~150s vs debug ~53s (+97s), test run ~7s vs ~12s (-5s). break-even is ~20 full-suite reruns with no rebuild, which is not a real workflow. use plain `cargo test`
 
 commits:
   format: <type>(<scope>): <description>
