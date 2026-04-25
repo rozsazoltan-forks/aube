@@ -156,10 +156,17 @@ pub fn shell_quote_arg(arg: &str) -> String {
     {
         let mut out = String::with_capacity(arg.len() + 2);
         out.push('"');
+        let mut backslashes: usize = 0;
         for ch in arg.chars() {
             match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
+                '\\' => backslashes += 1,
+                '"' => {
+                    for _ in 0..backslashes * 2 + 1 {
+                        out.push('\\');
+                    }
+                    out.push('"');
+                    backslashes = 0;
+                }
                 // cmd.exe expands %VAR% even inside double quotes.
                 // Outer `/s /c "..."` only strips the outermost
                 // quote pair, the shell still runs env expansion
@@ -170,9 +177,24 @@ pub fn shell_quote_arg(arg: &str) -> String {
                 // caret-escaping of `^ & | < > ( )` is a deeper
                 // rabbit hole, this handles the common injection
                 // vector.
-                '%' => out.push_str("%%"),
-                _ => out.push(ch),
+                '%' => {
+                    for _ in 0..backslashes {
+                        out.push('\\');
+                    }
+                    backslashes = 0;
+                    out.push_str("%%");
+                }
+                _ => {
+                    for _ in 0..backslashes {
+                        out.push('\\');
+                    }
+                    backslashes = 0;
+                    out.push(ch);
+                }
             }
+        }
+        for _ in 0..backslashes * 2 {
+            out.push('\\');
         }
         out.push('"');
         out
@@ -556,4 +578,28 @@ pub enum Error {
     Spawn(String, String),
     #[error("script `{script}` exited with code {code:?}")]
     NonZeroExit { script: String, code: Option<i32> },
+}
+
+#[cfg(all(test, windows))]
+mod windows_quote_tests {
+    use super::shell_quote_arg;
+
+    #[test]
+    fn windows_path_backslash_not_doubled() {
+        let q = shell_quote_arg(r"C:\Users\me\file.txt");
+        assert_eq!(q, "\"C:\\Users\\me\\file.txt\"");
+    }
+
+    #[test]
+    fn windows_trailing_backslash_doubled_before_close_quote() {
+        let q = shell_quote_arg(r"C:\path\");
+        assert_eq!(q, "\"C:\\path\\\\\"");
+    }
+
+    #[test]
+    fn windows_quote_in_arg_escapes_with_backslash() {
+        assert_eq!(shell_quote_arg(r#"a"b"#), "\"a\\\"b\"");
+        assert_eq!(shell_quote_arg(r#"a\"b"#), "\"a\\\\\\\"b\"");
+        assert_eq!(shell_quote_arg(r#"a\\"b"#), "\"a\\\\\\\\\\\"b\"");
+    }
 }

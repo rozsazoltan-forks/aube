@@ -2769,6 +2769,92 @@ struct PatchSection {
 /// out of the `b/...` half (post-edit name), and capture everything
 /// from the next `--- ` line until the following `diff --git ` (or
 /// EOF) as the diffy-compatible body.
+fn parse_diff_git_b_path(rest: &str) -> Option<String> {
+    if let Some(after) = rest.strip_prefix("\"a/") {
+        let end_a = after.find("\" \"b/")?;
+        let after_b = &after[end_a + 5..];
+        let close = after_b.rfind('"')?;
+        return unescape_git_quoted(&after_b[..close]);
+    }
+    let body = rest.strip_prefix("a/")?;
+    let mut search_from = 0;
+    while let Some(rel) = body[search_from..].find(" b/") {
+        let abs = search_from + rel;
+        let path_a = &body[..abs];
+        let path_b = &body[abs + 3..];
+        if path_a == path_b {
+            return Some(path_b.to_string());
+        }
+        search_from = abs + 1;
+    }
+    body.find(" b/").map(|i| body[i + 3..].to_string())
+}
+
+fn unescape_git_quoted(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            return None;
+        }
+        match bytes[i + 1] {
+            b'\\' => {
+                out.push(b'\\');
+                i += 2;
+            }
+            b'"' => {
+                out.push(b'"');
+                i += 2;
+            }
+            b'n' => {
+                out.push(b'\n');
+                i += 2;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 2;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 2;
+            }
+            b'a' => {
+                out.push(0x07);
+                i += 2;
+            }
+            b'b' => {
+                out.push(0x08);
+                i += 2;
+            }
+            b'f' => {
+                out.push(0x0C);
+                i += 2;
+            }
+            b'v' => {
+                out.push(0x0B);
+                i += 2;
+            }
+            d0 @ b'0'..=b'3'
+                if i + 3 < bytes.len()
+                    && (b'0'..=b'7').contains(&bytes[i + 2])
+                    && (b'0'..=b'7').contains(&bytes[i + 3]) =>
+            {
+                let n = ((d0 - b'0') << 6) | ((bytes[i + 2] - b'0') << 3) | (bytes[i + 3] - b'0');
+                out.push(n);
+                i += 4;
+            }
+            _ => return None,
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 fn split_patch_sections(text: &str) -> Vec<PatchSection> {
     let mut out: Vec<PatchSection> = Vec::new();
     let mut current_path: Option<String> = None;
@@ -2792,17 +2878,14 @@ fn split_patch_sections(text: &str) -> Vec<PatchSection> {
     };
 
     for line in text.split_inclusive('\n') {
-        let stripped = line.trim_end_matches('\n');
+        let stripped = line.trim_end_matches(['\n', '\r']);
         if let Some(rest) = stripped.strip_prefix("diff --git ") {
             // New file boundary — flush whatever we were collecting.
             flush(&mut out, &mut current_path, &mut body, &mut is_deletion);
             in_body = false;
             // Parse `a/<path> b/<path>` and prefer the post-edit
             // (`b/`) path so renames land on the new name.
-            if let Some(b_idx) = rest.find(" b/") {
-                let after_b = &rest[b_idx + 3..];
-                current_path = Some(after_b.to_string());
-            }
+            current_path = parse_diff_git_b_path(rest);
             continue;
         }
         if !in_body {
@@ -2817,7 +2900,8 @@ fn split_patch_sections(text: &str) -> Vec<PatchSection> {
                 {
                     body.push_str(&format!("--- a/{rel}\n"));
                 } else {
-                    body.push_str(line);
+                    body.push_str(stripped);
+                    body.push('\n');
                 }
             }
             // Skip git's `index ...` / `new file mode ...` /
@@ -2834,7 +2918,8 @@ fn split_patch_sections(text: &str) -> Vec<PatchSection> {
             is_deletion = true;
             continue;
         }
-        body.push_str(line);
+        body.push_str(stripped);
+        body.push('\n');
     }
     flush(&mut out, &mut current_path, &mut body, &mut is_deletion);
     out
@@ -2958,6 +3043,70 @@ mod patch_tests {
             std::fs::read_to_string(pkg.join("index.js")).unwrap(),
             "module.exports = 'new';\n"
         );
+    }
+
+    #[test]
+    fn crlf_patch_path_does_not_carry_carriage_return() {
+        let patch = "diff --git a/index.js b/index.js\r\n\
+                     --- a/index.js\r\n\
+                     +++ b/index.js\r\n\
+                     @@ -1 +1 @@\r\n\
+                     -module.exports = 'old';\r\n\
+                     +module.exports = 'new';\r\n";
+        let sections = split_patch_sections(patch);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].rel_path.as_deref(), Some("index.js"));
+    }
+
+    #[test]
+    fn crlf_deletion_patch_recognized() {
+        let patch = "diff --git a/removed.js b/removed.js\r\n\
+                     deleted file mode 100644\r\n\
+                     --- a/removed.js\r\n\
+                     +++ /dev/null\r\n\
+                     @@ -1 +0,0 @@\r\n\
+                     -gone\r\n";
+        let sections = split_patch_sections(patch);
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].is_deletion);
+    }
+
+    #[test]
+    fn diff_git_path_with_space_b_substring() {
+        let patch = "diff --git a/a b/c.js b/a b/c.js\n\
+                     --- a/a b/c.js\n\
+                     +++ b/a b/c.js\n\
+                     @@ -1 +1 @@\n\
+                     -x\n\
+                     +y\n";
+        let sections = split_patch_sections(patch);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].rel_path.as_deref(), Some("a b/c.js"));
+    }
+
+    #[test]
+    fn diff_git_quoted_path_form() {
+        let patch = "diff --git \"a/path with spaces.js\" \"b/path with spaces.js\"\n\
+                     --- a/path with spaces.js\n\
+                     +++ b/path with spaces.js\n\
+                     @@ -1 +1 @@\n\
+                     -x\n\
+                     +y\n";
+        let sections = split_patch_sections(patch);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].rel_path.as_deref(), Some("path with spaces.js"));
+    }
+
+    #[test]
+    fn diff_git_quoted_path_unescapes_git_escapes() {
+        let path = parse_diff_git_b_path(r#""a/foo\".js" "b/foo\".js""#).expect("quoted parse");
+        assert_eq!(path, "foo\".js");
+        let path = parse_diff_git_b_path(r#""a/back\\slash.js" "b/back\\slash.js""#)
+            .expect("backslash parse");
+        assert_eq!(path, "back\\slash.js");
+        let path = parse_diff_git_b_path("\"a/caf\\303\\251.js\" \"b/caf\\303\\251.js\"")
+            .expect("octal parse");
+        assert_eq!(path, "café.js");
     }
 }
 

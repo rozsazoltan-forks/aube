@@ -61,9 +61,11 @@ impl SideEffectsCacheEntry {
             None => hash_dir_for_side_effects_cache(package_dir)?,
         };
         let safe_name = name.replace('/', "__");
+        let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
         Ok(Self {
             path: root
                 .join(format!("{safe_name}@{version}"))
+                .join(platform)
                 .join(&input_hash),
             input_hash,
         })
@@ -422,6 +424,21 @@ fn create_symlink_like(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_path_segregates_by_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), "{\"name\":\"p\"}\n").unwrap();
+        let entry = SideEffectsCacheEntry::new(dir.path(), "p", "1.0.0", &pkg).unwrap();
+        let s = entry.path.to_string_lossy().into_owned();
+        let segment = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        assert!(
+            s.contains(&segment),
+            "cache path lacks platform segment {segment}: {s}"
+        );
+    }
 
     #[test]
     fn side_effects_marker_accepts_only_sha512_hex() {
