@@ -2751,3 +2751,13 @@ async fn same_dep_in_dev_and_optional_dependencies_dedupes() {
     assert_eq!(root[0].name, "p-map");
     assert_eq!(root[0].dep_type, DepType::Dev);
 }
+
+#[test]
+fn pick_version_exact_pin_not_hijacked_by_dist_tag() {
+    let mut packument = make_packument("foo", &["1.0.0", "1.5.0"], "1.5.0");
+    packument
+        .dist_tags
+        .insert("1.0.0".to_string(), "1.5.0".to_string());
+    let result = pick_version(&packument, "1.0.0", None, false, None, false).unwrap();
+    assert_eq!(result.version, "1.0.0");
+}

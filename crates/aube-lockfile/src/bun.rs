@@ -821,8 +821,8 @@ fn split_ident(ident: &str) -> Option<(String, String)> {
 /// when rendered against the original source via `miette`'s fancy
 /// handler.
 fn strip_jsonc(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     let mut in_string = false;
     let mut escape = false;
@@ -831,13 +831,15 @@ fn strip_jsonc(input: &str) -> String {
         let c = bytes[i];
 
         if in_string {
-            out.push(c as char);
+            out.push(c);
             if escape {
                 escape = false;
-            } else if c == b'\\' {
-                escape = true;
-            } else if c == b'"' {
-                in_string = false;
+            } else if c < 0x80 {
+                if c == b'\\' {
+                    escape = true;
+                } else if c == b'"' {
+                    in_string = false;
+                }
             }
             i += 1;
             continue;
@@ -847,7 +849,7 @@ fn strip_jsonc(input: &str) -> String {
         // newline with a space. The `\n` itself is kept.
         if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
             while i < bytes.len() && bytes[i] != b'\n' {
-                out.push(' ');
+                out.push(b' ');
                 i += 1;
             }
             continue;
@@ -856,23 +858,23 @@ fn strip_jsonc(input: &str) -> String {
         // Block comment: replace every byte with a space, but keep
         // embedded newlines so line numbers don't shift.
         if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            out.push(' ');
-            out.push(' ');
+            out.push(b' ');
+            out.push(b' ');
             i += 2;
             while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
                 i += 1;
             }
             if i + 1 < bytes.len() {
                 // consume the closing `*/`
-                out.push(' ');
-                out.push(' ');
+                out.push(b' ');
+                out.push(b' ');
                 i += 2;
             } else {
                 // unterminated block comment — mirror every remaining
                 // byte to preserve length, keeping newlines intact.
                 while i < bytes.len() {
-                    out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                    out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
                     i += 1;
                 }
             }
@@ -883,11 +885,11 @@ fn strip_jsonc(input: &str) -> String {
         // non-whitespace char is `}` or `]`.
         if c == b',' {
             let mut j = i + 1;
-            while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+            while j < bytes.len() && bytes[j] < 0x80 && (bytes[j] as char).is_whitespace() {
                 j += 1;
             }
             if j < bytes.len() && (bytes[j] == b'}' || bytes[j] == b']') {
-                out.push(' ');
+                out.push(b' ');
                 i += 1;
                 continue;
             }
@@ -897,11 +899,11 @@ fn strip_jsonc(input: &str) -> String {
             in_string = true;
         }
 
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
 
-    out
+    String::from_utf8(out).expect("strip_jsonc preserves UTF-8 validity")
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,6 +1582,22 @@ mod tests {
         let out = strip_jsonc(input);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["url"], "http://example.com/path");
+    }
+
+    #[test]
+    fn strip_jsonc_preserves_utf8_string_value() {
+        let input = "{ \"name\": \"café\" }";
+        let out = strip_jsonc(input);
+        assert_eq!(out.len(), input.len());
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["name"], "café");
+    }
+
+    #[test]
+    fn strip_jsonc_preserves_offsets_for_nonascii_in_comments() {
+        let input = "{ // café\n  \"a\": 1 }";
+        let out = strip_jsonc(input);
+        assert_eq!(out.len(), input.len());
     }
 
     /// `strip_jsonc` must preserve byte offsets so a `serde_json` error
