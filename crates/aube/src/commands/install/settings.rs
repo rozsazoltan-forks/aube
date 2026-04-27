@@ -80,7 +80,9 @@ fn resolve_minimum_release_age(
             .unwrap_or_default()
             .into_iter()
             .collect();
-    let strict = aube_settings::resolved::minimum_release_age_strict(ctx);
+    // `paranoid=true` forces the gate to be hard, not advisory.
+    let strict = aube_settings::resolved::minimum_release_age_strict(ctx)
+        || aube_settings::resolved::paranoid(ctx);
     Some(aube_resolver::MinimumReleaseAge {
         minutes,
         exclude,
@@ -270,7 +272,8 @@ pub(super) fn resolve_verify_store_integrity(ctx: &aube_settings::ResolveCtx<'_>
 /// promotes the warning to a hard error, which matters when a
 /// registry proxy or MITM could be stripping the integrity field.
 pub(super) fn resolve_strict_store_integrity(ctx: &aube_settings::ResolveCtx<'_>) -> bool {
-    aube_settings::resolved::strict_store_integrity(ctx)
+    // `paranoid=true` promotes "missing dist.integrity" to a hard fail.
+    aube_settings::resolved::strict_store_integrity(ctx) || aube_settings::resolved::paranoid(ctx)
 }
 
 /// Resolve `strictStorePkgContentCheck` from `.npmrc`. Defaults to
@@ -382,15 +385,28 @@ pub(crate) fn resolve_dependency_policy(
     merge_string_map_setting(ctx, "allowedDeprecatedVersions", &mut allowed_deprecated);
     policy.allowed_deprecated_versions = allowed_deprecated;
 
-    policy.trust_policy = match aube_settings::resolved::trust_policy(ctx) {
-        aube_settings::resolved::TrustPolicy::NoDowngrade => {
-            aube_resolver::TrustPolicy::NoDowngrade
+    // `paranoid=true` forces no-downgrade regardless of the explicit
+    // `trustPolicy` value — that's the whole point of the bundle switch.
+    let paranoid = aube_settings::resolved::paranoid(ctx);
+    policy.trust_policy = if paranoid {
+        aube_resolver::TrustPolicy::NoDowngrade
+    } else {
+        match aube_settings::resolved::trust_policy(ctx) {
+            aube_settings::resolved::TrustPolicy::NoDowngrade => {
+                aube_resolver::TrustPolicy::NoDowngrade
+            }
+            aube_settings::resolved::TrustPolicy::Off => aube_resolver::TrustPolicy::Off,
         }
-        aube_settings::resolved::TrustPolicy::Off => aube_resolver::TrustPolicy::Off,
     };
-    policy.trust_policy_exclude = aube_settings::resolved::trust_policy_exclude(ctx)
-        .into_iter()
-        .collect();
+    // Parse trustPolicyExclude pattern-by-pattern so one malformed entry
+    // doesn't drop the rest. Silently dropping every rule on a typo
+    // would turn the opt-in into a security regression.
+    let trust_excludes = aube_settings::resolved::trust_policy_exclude(ctx);
+    let (rules, parse_errors) = aube_resolver::TrustExcludeRules::parse_lossy(trust_excludes);
+    for err in parse_errors {
+        tracing::warn!(error = %err, "ignoring malformed trustPolicyExclude entry");
+    }
+    policy.trust_policy_exclude = rules;
     policy.trust_policy_ignore_after = aube_settings::resolved::trust_policy_ignore_after(ctx);
     policy.block_exotic_subdeps = aube_settings::resolved::block_exotic_subdeps(ctx);
 

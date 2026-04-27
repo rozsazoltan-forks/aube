@@ -404,29 +404,31 @@ watch(progressBarEl, (el, previousEl) => {
         </span>
         <span class="aube-proof-link">node_modules layout -></span>
       </a>
-      <a class="aube-proof-item" href="/package-manager/jailed-builds">
+      <a class="aube-proof-item" href="/security">
         <span class="aube-proof-number">05</span>
         <span class="aube-proof-tag">secure</span>
         <span class="aube-proof-visual aube-proof-scripts" aria-hidden="true">
           <span class="aube-script-row aube-script-row-root">
-            <b>minimum age</b>
-            <i>on</i>
-          </span>
-          <span class="aube-script-row">
-            <b>exotic deps</b>
+            <b>trust downgrades</b>
             <i>blocked</i>
           </span>
           <span class="aube-script-row">
-            <b>jailed builds</b>
-            <i>opt in</i>
+            <b>new releases</b>
+            <i>24h cooling</i>
+          </span>
+          <span class="aube-script-row">
+            <b>build scripts</b>
+            <i>deny by default</i>
           </span>
         </span>
-        <strong>Jailed builds for dependency scripts.</strong>
+        <strong>Supply-chain defaults across the install path.</strong>
         <span>
-          Approve the packages that may build, then run lifecycle scripts with
-          a scrubbed env, temporary HOME, and package-glob permissions.
+          Trust downgrades fail at resolve, new releases sit out a 24h cooling
+          window, lifecycle scripts wait for approval, and exotic transitive
+          deps are blocked. <code>paranoid: true</code> adds the build jail
+          and turns the soft gates into hard fails.
         </span>
-        <span class="aube-proof-link">Jailed builds -></span>
+        <span class="aube-proof-link">Security overview -></span>
       </a>
     </section>
   </main>

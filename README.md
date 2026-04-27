@@ -30,7 +30,7 @@
 
 **[Less disk use](https://aube.en.dev/package-manager/node-modules).** A global content-addressable store lets projects share package files instead of keeping a full copy of the same dependencies in every checkout.
 
-**[Secure defaults](https://aube.en.dev/package-manager/jailed-builds).** aube defaults to safer installs: new releases wait out a minimum age, exotic transitive dependencies are blocked, and approved lifecycle scripts can run in a package-scoped jail.
+**[Secure defaults](https://aube.en.dev/security).** Out of the box, exotic transitive deps are blocked, lifecycle scripts wait for approval, trust downgrades fail at resolve, and brand-new releases sit in a 24h cooling window. One `paranoid: true` line adds the build jail and turns the soft gates into hard fails.
 
 ## Install
 

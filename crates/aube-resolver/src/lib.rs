@@ -8,6 +8,7 @@ mod peer_context;
 pub mod platform;
 mod resolve;
 mod semver_util;
+mod trust;
 mod types;
 
 pub use error::{AgeGateDetails, CatalogDetails, Error, ExoticSubdepDetails, NoMatchDetails};
@@ -17,6 +18,8 @@ pub use peer_context::{
     hoist_auto_installed_peers,
 };
 pub use platform::{SupportedArchitectures, is_supported};
+pub use trust::{MissingTimeDetails as MissingTrustTimeDetails, TrustDowngradeDetails};
+pub use trust::{TrustEvidence, TrustExcludeParseError, TrustExcludeRules};
 pub use types::{
     DependencyPolicy, MinimumReleaseAge, PackageExtension, ReadPackageHook, ResolutionMode,
     ResolvedPackage, TrustPolicy,

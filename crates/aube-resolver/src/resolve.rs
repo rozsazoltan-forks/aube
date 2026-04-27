@@ -145,10 +145,20 @@ impl Resolver {
         // cheaper abbreviated path stays on the hot path and we save
         // one full-packument fetch per distinct package.
         let needs_time = (self.resolution_mode == ResolutionMode::TimeBased
-            || self.minimum_release_age.is_some())
+            || self.minimum_release_age.is_some()
+            || self.dependency_policy.trust_policy == crate::TrustPolicy::NoDowngrade)
             && !self.registry_supports_time_field;
-        let minimum_release_age_only =
-            self.resolution_mode != ResolutionMode::TimeBased && self.minimum_release_age.is_some();
+        // Gate for the corgi-shortcircuit at L219-235: when the only
+        // reason we need `time` is `minimumReleaseAge` AND the
+        // packument's top-level `modified` predates the cutoff, every
+        // version is old enough so we can skip the full-packument
+        // fetch. trustPolicy=NoDowngrade adds a second time requirement
+        // (per-version compare), so the shortcircuit must NOT fire when
+        // it's on — otherwise the trust check falls through to a
+        // spurious TrustCheckMissingTime on every version.
+        let minimum_release_age_only = self.resolution_mode != ResolutionMode::TimeBased
+            && self.minimum_release_age.is_some()
+            && self.dependency_policy.trust_policy != crate::TrustPolicy::NoDowngrade;
         // In-flight packument fetches. The spawned task returns the
         // `(name, packument)` tuple so `join_next` gives us back the
         // identity of whichever fetch landed next without a side
@@ -1268,6 +1278,31 @@ impl Resolver {
                         ))));
                     }
                 };
+                // Trust-policy enforcement runs *before* any other
+                // post-pick processing (mirrors pnpm's placement
+                // immediately after `pickPackage`). Skip when policy is
+                // off so the off-by-default case is a single enum
+                // compare. The check needs the live packument's `time`
+                // map and all version metadata, both of which are still
+                // in scope here from L1191.
+                if self.dependency_policy.trust_policy == crate::TrustPolicy::NoDowngrade {
+                    crate::trust::check_no_downgrade(
+                        packument,
+                        &picked_ref.version,
+                        picked_ref,
+                        &self.dependency_policy.trust_policy_exclude,
+                        self.dependency_policy.trust_policy_ignore_after,
+                    )
+                    .map_err(|e| match e {
+                        crate::trust::TrustCheckError::Downgrade(d) => {
+                            Error::TrustDowngrade(Box::new(d))
+                        }
+                        crate::trust::TrustCheckError::MissingTime(d) => {
+                            Error::TrustCheckMissingTime(Box::new(d))
+                        }
+                    })?;
+                }
+
                 // Clone the picked metadata into an owned value so we can
                 // both run the `readPackage` hook (which needs a
                 // disjoint `&mut self` borrow) and, later, mutate the

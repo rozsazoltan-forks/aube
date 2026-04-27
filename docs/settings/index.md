@@ -21,9 +21,10 @@ Aube generates this page from [`settings.toml`](https://github.com/endevco/aube/
 | [`minimumReleaseAge`](#setting-minimumreleaseage) | `int` | Delay installation of newly published versions (minutes). |
 | [`minimumReleaseAgeExclude`](#setting-minimumreleaseageexclude) | `list<string>` | Packages exempt from the minimumReleaseAge requirement. |
 | [`minimumReleaseAgeStrict`](#setting-minimumreleaseagestrict) | `bool` | Fail the install when no version satisfies the minimumReleaseAge cutoff. |
-| [`trustPolicy`](#setting-trustpolicy) | `"no-downgrade" \| "off"` | Behavior when a package's trust level decreases between installs. |
-| [`trustPolicyExclude`](#setting-trustpolicyexclude) | `list<string>` | Packages exempt from trust policy checks. |
-| [`trustPolicyIgnoreAfter`](#setting-trustpolicyignoreafter) | `int` | Ignore trust policy for packages older than this age (minutes). |
+| [`paranoid`](#setting-paranoid) | `bool` | Turn on the strict-security setting bundle in one switch. |
+| [`trustPolicy`](#setting-trustpolicy) | `"no-downgrade" \| "off"` | Fail install when a package's trust evidence weakens between releases. |
+| [`trustPolicyExclude`](#setting-trustpolicyexclude) | `list<string>` | Packages exempt from `trustPolicy` checks. |
+| [`trustPolicyIgnoreAfter`](#setting-trustpolicyignoreafter) | `int` | Skip the trust check for versions older than this many minutes. |
 | [`blockExoticSubdeps`](#setting-blockexoticsubdeps) | `bool` | Restrict transitive dependencies to trusted sources (registries, not git/tarball URLs). |
 | [`registries`](#setting-registries) | `object` | Registry URLs, including scoped registry overrides. |
 | [`hoist`](#setting-hoist) | `bool` | Hoist all dependencies to the hidden modules directory. |
@@ -298,24 +299,47 @@ By default the resolver falls back to the lowest satisfying version when
 every candidate is younger than `minimumReleaseAge`. With this set, the
 resolver fails the install instead.
 
+### `paranoid` {#setting-paranoid}
+
+Turn on the strict-security setting bundle in one switch.
+
+- Type: `bool`
+- Default: `false`
+- Environment: `npm_config_paranoid`, `NPM_CONFIG_PARANOID`, `AUBE_PARANOID`
+- .npmrc keys: `paranoid`
+- Workspace YAML keys: `paranoid`
+
+When true, aube forces every individual setting in the strict-security
+bundle on, regardless of how each is configured individually:
+
+- `trustPolicy = no-downgrade` (overrides explicit `off`)
+- `jailBuilds = true`
+- `minimumReleaseAgeStrict = true` (makes the age gate hard, not advisory)
+- `strictStoreIntegrity = true` (fail on missing `dist.integrity`)
+- `strictDepBuilds = true` (fail when deps have unreviewed build scripts)
+
+Set to `false` (the default) to honor the underlying settings as-is.
+
 ### `trustPolicy` {#setting-trustpolicy}
 
-Behavior when a package's trust level decreases between installs.
+Fail install when a package's trust evidence weakens between releases.
 
 - Type: `"no-downgrade" | "off"`
-- Default: `"off"`
+- Default: `"no-downgrade"`
 - Environment: `npm_config_trust_policy`, `NPM_CONFIG_TRUST_POLICY`, `AUBE_TRUST_POLICY`
 - .npmrc keys: `trustPolicy`, `trust-policy`
 - Workspace YAML keys: `trustPolicy`
 
-When set to `no-downgrade`, aube accepts and preserves the policy in the
-resolver configuration. Registry trust metadata is not exposed through
-aube's packument path yet, so no downgrade failure can fire until that
-metadata source lands.
+When `no-downgrade` (the default), aube rejects a version that carries weaker
+trust evidence than any earlier-published version of the same package.
+Recognized evidence: npm trusted-publisher (`_npmUser.trustedPublisher`)
+outranks sigstore provenance (`dist.attestations.provenance`). Set to `off`
+to disable, or use `trustPolicyExclude` to whitelist specific packages or
+versions.
 
 ### `trustPolicyExclude` {#setting-trustpolicyexclude}
 
-Packages exempt from trust policy checks.
+Packages exempt from `trustPolicy` checks.
 
 - Type: `list<string>`
 - Default: `[]`
@@ -323,11 +347,13 @@ Packages exempt from trust policy checks.
 - .npmrc keys: `trustPolicyExclude`, `trust-policy-exclude`
 - Workspace YAML keys: `trustPolicyExclude`
 
-Whitelist for `trustPolicy`. Entries skip the downgrade check.
+Patterns: `name`, `name@1.0.0`, `name@1.0.0 || 1.0.1` (exact versions only —
+no `^`/`~`/`>=`), `is-*` (name glob, no version), `@scope/name@1.0.0`.
+Empty list disables exclusions.
 
 ### `trustPolicyIgnoreAfter` {#setting-trustpolicyignoreafter}
 
-Ignore trust policy for packages older than this age (minutes).
+Skip the trust check for versions older than this many minutes.
 
 - Type: `int`
 - Default: `undefined`
@@ -335,7 +361,8 @@ Ignore trust policy for packages older than this age (minutes).
 - .npmrc keys: `trustPolicyIgnoreAfter`, `trust-policy-ignore-after`
 - Workspace YAML keys: `trustPolicyIgnoreAfter`
 
-Useful for pinning very old versions that predate signing infrastructure.
+Versions whose publish time is older than the cutoff are exempted from
+`trustPolicy`. Leave unset to apply the check to every version.
 
 ### `blockExoticSubdeps` {#setting-blockexoticsubdeps}
 

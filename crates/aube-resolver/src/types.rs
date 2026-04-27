@@ -1,5 +1,5 @@
 use aube_lockfile::LocalSource;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -47,7 +47,7 @@ pub struct DependencyPolicy {
     pub package_extensions: Vec<PackageExtension>,
     pub allowed_deprecated_versions: BTreeMap<String, String>,
     pub trust_policy: TrustPolicy,
-    pub trust_policy_exclude: BTreeSet<String>,
+    pub trust_policy_exclude: crate::trust::TrustExcludeRules,
     pub trust_policy_ignore_after: Option<u64>,
     pub block_exotic_subdeps: bool,
 }
@@ -58,7 +58,7 @@ impl Default for DependencyPolicy {
             package_extensions: Vec::new(),
             allowed_deprecated_versions: BTreeMap::new(),
             trust_policy: TrustPolicy::default(),
-            trust_policy_exclude: BTreeSet::new(),
+            trust_policy_exclude: crate::trust::TrustExcludeRules::default(),
             trust_policy_ignore_after: None,
             block_exotic_subdeps: true,
         }
@@ -74,10 +74,15 @@ pub struct PackageExtension {
     pub peer_dependencies_meta: BTreeMap<String, aube_registry::PeerDepMeta>,
 }
 
+/// Default is `NoDowngrade` to match the user-facing default in
+/// `crates/aube-settings/settings.toml`. The install command overrides
+/// this from the resolved settings anyway, but library consumers
+/// constructing a `Resolver` via [`Resolver::new`] inherit the
+/// documented default behavior without extra plumbing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TrustPolicy {
-    NoDowngrade,
     #[default]
+    NoDowngrade,
     Off,
 }
 
