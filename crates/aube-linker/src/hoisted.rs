@@ -401,7 +401,12 @@ pub(crate) fn link_hoisted_importer(
             // Key already validated in the parent-collection loop
             // above. The index is immutable between the two loops.
             let target = pkg_dir.join(rel_path);
-            linker.link_file_fresh(stored, &target)?;
+            if let Err(e) = linker.link_file_fresh(stored, rel_path, &target) {
+                if let Error::MissingStoreFile { .. } = &e {
+                    crate::invalidate_stale_index_for_package(&linker.store, pkg);
+                }
+                return Err(e);
+            }
             stats.files_linked += 1;
             if stored.executable {
                 #[cfg(unix)]
