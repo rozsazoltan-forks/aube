@@ -6,6 +6,7 @@ pub mod override_rule;
 mod package_ext;
 mod peer_context;
 pub mod platform;
+mod primer;
 mod resolve;
 mod semver_util;
 mod trust;
@@ -18,6 +19,7 @@ pub use peer_context::{
     hoist_auto_installed_peers,
 };
 pub use platform::{SupportedArchitectures, is_supported};
+pub use primer::{PruneStats as PrimerPruneStats, prune_cache as prune_primer_cache};
 pub use trust::{MissingTimeDetails as MissingTrustTimeDetails, TrustDowngradeDetails};
 pub use trust::{TrustEvidence, TrustExcludeParseError, TrustExcludeRules};
 pub use types::{
@@ -189,6 +191,12 @@ pub struct Resolver {
     /// active, since the abbreviated path is already the only one
     /// running.
     registry_supports_time_field: bool,
+    /// Use the bundled metadata primer even when the configured
+    /// registry is not npmjs.org. Intended for npm-compatible mirrors
+    /// and controlled benchmarks; tarball URLs are rewritten to the
+    /// active registry before cache seeding so installs still fetch
+    /// package bytes from the configured source.
+    force_metadata_primer: bool,
     pub(crate) packument_network_concurrency: Option<usize>,
 }
 
