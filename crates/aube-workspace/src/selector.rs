@@ -33,6 +33,10 @@ pub struct EffectiveFilter {
     /// Raw `--filter-prod` values. These apply the same selector forms as
     /// `filters` but restrict graph walks to production edges.
     pub filter_prods: Vec<String>,
+    /// `--fail-if-no-match` — promote "no projects matched" from a warning
+    /// to a hard error. pnpm's default is to warn and exit 0; this flag
+    /// (mirrored) opts into the strict behavior for CI use.
+    pub fail_if_no_match: bool,
 }
 
 impl EffectiveFilter {
@@ -50,6 +54,7 @@ impl EffectiveFilter {
         Self {
             filters: filters.into_iter().map(Into::into).collect(),
             filter_prods: Vec::new(),
+            fail_if_no_match: false,
         }
     }
 }
@@ -128,12 +133,18 @@ impl Selector {
             BaseSelector::ChangedSince(raw[1..raw.len() - 1].to_string())
         }
         // Path-style selectors: leading `./`, `../`, `/`, or a trailing `/`.
+        // The pnpm-style `./packages/**` "directory and all descendants"
+        // form already enters this branch via the `./` prefix; we then
+        // strip the `/**` suffix so it collapses to the same `./packages`
+        // path. We deliberately do NOT also accept a bare `/**` suffix
+        // here — `@scope/**` and `name/**` are name globs and must keep
+        // routing through the `NameGlob` branch below.
         else if raw.starts_with("./")
             || raw.starts_with("../")
             || raw.starts_with('/')
             || raw.ends_with('/')
         {
-            let trimmed = raw.trim_end_matches('/');
+            let trimmed = raw.strip_suffix("/**").unwrap_or(raw).trim_end_matches('/');
             // Strip a leading `./` so the stored PathBuf has no CurDir
             // component. `Path::components` normalizes mid-path `CurDir`
             // already, but keeping the stored form canonical makes the
@@ -563,6 +574,34 @@ mod tests {
             Selector::parse("./packages/a").unwrap(),
             Selector {
                 base: BaseSelector::Path(PathBuf::from("packages/a")),
+                include_dependencies: false,
+                include_dependents: false,
+                exclude_self: false,
+                exclude: false,
+                prod_only: false,
+            }
+        );
+        // `./packages/**` is the pnpm "directory and all descendants"
+        // form; aube collapses it to the same path because the matcher
+        // is already "at or under".
+        assert_eq!(
+            Selector::parse("./packages/**").unwrap(),
+            Selector {
+                base: BaseSelector::Path(PathBuf::from("packages")),
+                include_dependencies: false,
+                include_dependents: false,
+                exclude_self: false,
+                exclude: false,
+                prod_only: false,
+            }
+        );
+        // A bare `<name>/**` (no path-y prefix) must keep routing
+        // through `NameGlob` — `@scope/**` is a scoped name glob, not
+        // a path.
+        assert_eq!(
+            Selector::parse("@scope/**").unwrap(),
+            Selector {
+                base: BaseSelector::NameGlob("@scope/**".into()),
                 include_dependencies: false,
                 include_dependents: false,
                 exclude_self: false,
