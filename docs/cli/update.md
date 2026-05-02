@@ -37,7 +37,9 @@ Parsed for pnpm compatibility.
 
 ### `-L --latest`
 
-Update past the manifest range: rewrite `package.json` specifiers to match the newly resolved versions (the registry's `latest` dist-tag, clamped by `minimumReleaseAge` / `resolution-mode` as usual)
+Update past the manifest range.
+
+Rewrites `package.json` specifiers to match the newly resolved versions (the registry's `latest` dist-tag, clamped by `minimumReleaseAge` / `resolution-mode` as usual).
 
 ### `-P --prod`
 
@@ -51,7 +53,7 @@ Update dependencies in the current workspace package
 
 Dependency traversal depth.
 
-Parsed for pnpm compatibility.
+Parsed for pnpm compatibility but ignored: aube only ever refreshes direct deps (pnpm's `--depth 0` default). Setting the flag emits a one-line warning pointing at `rm aube-lock.yaml && aube install` for the `--depth Infinity` case.
 
 ### `--global-pnpmfile <PATH>`
 
