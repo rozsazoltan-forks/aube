@@ -35,9 +35,10 @@ use crate::{
     DepType, DirectDep, Error, GitSource, LocalSource, LockedPackage, LockfileGraph, PeerDepMeta,
     RemoteTarballSource,
 };
+use aube_util::path::normalize_lexical;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Component, Path};
 
 #[derive(Debug, Deserialize)]
 struct RawBunLockfile {
@@ -251,6 +252,18 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         let entry = BunEntry::from_array(key, value).map_err(|e| Error::parse(path, e))?;
         entries.insert(key.clone(), entry);
     }
+    let mut workspace_scopes: Vec<(&str, &str)> = raw
+        .workspaces
+        .iter()
+        .filter(|(ws_path, _)| !ws_path.is_empty())
+        .filter_map(|(ws_path, ws)| {
+            ws.extra
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(|name| (name, ws_path.as_str()))
+        })
+        .collect();
+    workspace_scopes.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
 
     // First pass: parse (name, version) for each entry. bun.lock keys look
     // like the package name ("foo") for the hoisted version, or a nested
@@ -286,6 +299,8 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             entry.integrity.as_deref(),
             path,
         )?;
+        let local_source = local_source
+            .map(|local| rebase_workspace_scoped_local_source(key, local, &workspace_scopes));
         key_info.insert(key.clone(), (name.clone(), version.clone()));
 
         let dep_path = format!("{name}@{version}");
@@ -440,13 +455,14 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
     // Workspace importers. bun.lock keys workspace paths as `""` for
     // the root and relative paths (`packages/app`, etc.) for each
     // workspace package. Each importer's direct deps resolve first
-    // to a workspace-scoped override (`packages/app/foo`) when one
-    // exists, falling back to the hoisted entry (`foo`). We don't
-    // walk intermediate ancestors like `packages/foo` the way
-    // `resolve_nested_bun` does for package-nesting — workspace path
-    // segments are directories, not package-nesting scopes, so a
-    // partial walk could wrongly match a literal npm package named
-    // `packages` that has its own nested `foo` entry.
+    // to a name-scoped override (`app/foo`) or path-scoped override
+    // (`packages/app/foo`) when one exists, falling back to the
+    // hoisted entry (`foo`). We don't walk intermediate ancestors
+    // like `packages/foo` the way `resolve_nested_bun` does for
+    // package-nesting — workspace path segments are directories, not
+    // package-nesting scopes, so a partial walk could wrongly match a
+    // literal npm package named `packages` that has its own nested
+    // `foo` entry.
     let mut importers: BTreeMap<String, Vec<DirectDep>> = BTreeMap::new();
     let mut workspace_extra_fields: BTreeMap<String, BTreeMap<String, serde_json::Value>> =
         BTreeMap::new();
@@ -456,10 +472,13 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         } else {
             ws_path.clone()
         };
+        let ws_name = (!ws_path.is_empty())
+            .then(|| ws_raw.extra.get("name").and_then(serde_json::Value::as_str))
+            .flatten();
         let mut direct: Vec<DirectDep> = Vec::new();
         let push_dep =
             |name: &str, specifier: &str, dep_type: DepType, direct: &mut Vec<DirectDep>| {
-                if let Some(target_key) = resolve_workspace_dep(ws_path, name, &key_info)
+                if let Some(target_key) = resolve_workspace_dep(ws_path, ws_name, name, &key_info)
                     && let Some((dname, dver)) = key_info.get(&target_key)
                 {
                     direct.push(DirectDep {
@@ -699,6 +718,39 @@ fn classify_bun_ident(
     Ok((name, raw_version.to_string(), None, alias_of))
 }
 
+fn rebase_workspace_scoped_local_source(
+    key: &str,
+    local: LocalSource,
+    workspace_scopes: &[(&str, &str)],
+) -> LocalSource {
+    let Some(local_path) = local.path() else {
+        return local;
+    };
+    // Bun may write workspace-name-scoped local entries with
+    // root-relative bare paths (`vendor/local-dir`) or
+    // importer-relative climbs (`../../vendor/local.tgz`). Only the
+    // latter needs rebasing to project-root form.
+    if !local_path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return local;
+    }
+    let Some((_, ws_path)) = workspace_scopes.iter().find(|(name, _)| {
+        key.strip_prefix(*name)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+    }) else {
+        return local;
+    };
+    let rebased = normalize_lexical(&Path::new(ws_path).join(local_path));
+    match local {
+        LocalSource::Directory(_) => LocalSource::Directory(rebased),
+        LocalSource::Tarball(_) => LocalSource::Tarball(rebased),
+        LocalSource::Link(_) => LocalSource::Link(rebased),
+        LocalSource::Git(_) | LocalSource::RemoteTarball(_) => local,
+    }
+}
+
 fn split_committish(spec: &str) -> (String, Option<String>) {
     match spec.rfind('#') {
         Some(i) => (spec[..i].to_string(), Some(spec[i + 1..].to_string())),
@@ -784,7 +836,8 @@ fn resolve_nested_bun(
 /// Resolve a direct dep of a workspace importer at path `ws_path`
 /// (e.g. `""` for root, `"packages/app"` for a nested workspace) to
 /// its `key_info` key. Checks the workspace-scoped override
-/// (`<ws_path>/<dep_name>`) first, then the hoisted bare key
+/// (`<workspace_name>/<dep_name>`), the path-scoped override
+/// (`<ws_path>/<dep_name>`), then the hoisted bare key
 /// (`<dep_name>`). Intentionally does *not* walk intermediate
 /// ancestors like `packages/<dep_name>` — those are
 /// package-nesting keys that belong to `resolve_nested_bun`, and
@@ -793,9 +846,16 @@ fn resolve_nested_bun(
 /// entry.
 fn resolve_workspace_dep(
     ws_path: &str,
+    ws_name: Option<&str>,
     dep_name: &str,
     key_info: &BTreeMap<String, (String, String)>,
 ) -> Option<String> {
+    if let Some(ws_name) = ws_name {
+        let ws_specific = format!("{ws_name}/{dep_name}");
+        if key_info.contains_key(&ws_specific) {
+            return Some(ws_specific);
+        }
+    }
     if !ws_path.is_empty() {
         let ws_specific = format!("{ws_path}/{dep_name}");
         if key_info.contains_key(&ws_specific) {
@@ -1627,6 +1687,7 @@ fn inline_json(value: &serde_json::Value, _base_indent: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_split_ident() {
@@ -2657,6 +2718,95 @@ mod tests {
         assert_eq!(
             bar.dep_path, "bar@1.0.0",
             "workspace `bar` must resolve to hoisted 1.0.0, not packages/bar@9.9.9"
+        );
+    }
+
+    /// Bun scopes non-hoisted direct deps under the workspace package
+    /// name, not the workspace directory path. A workspace at
+    /// `packages/z-app` named `z-app` can therefore depend on
+    /// `z-app/tslib` while another workspace gets the hoisted `tslib`.
+    #[test]
+    fn test_parse_workspace_dep_prefers_workspace_name_scope() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let sri = fake_sri('a');
+        let content = r#"{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "root" },
+    "packages/a-other": {
+      "name": "a-other",
+      "dependencies": { "tslib": "2.8.1" }
+    },
+    "packages/z-app": {
+      "name": "z-app",
+      "dependencies": { "tslib": "2.4.0" }
+    }
+  },
+  "packages": {
+    "a-other": ["a-other@workspace:packages/a-other"],
+    "tslib": ["tslib@2.8.1", "", {}, "SRI"],
+    "z-app": ["z-app@workspace:packages/z-app"],
+    "z-app/tslib": ["tslib@2.4.0", "", {}, "SRI"]
+  }
+}"#
+        .replace("SRI", &sri);
+        std::fs::write(tmp.path(), &content).unwrap();
+        let graph = parse(tmp.path()).unwrap();
+
+        let other = graph
+            .importers
+            .get("packages/a-other")
+            .expect("packages/a-other importer");
+        let hoisted_tslib = other.iter().find(|d| d.name == "tslib").expect("tslib dep");
+        assert_eq!(
+            hoisted_tslib.dep_path, "tslib@2.8.1",
+            "sibling workspace must still resolve to the hoisted tslib"
+        );
+
+        let app = graph
+            .importers
+            .get("packages/z-app")
+            .expect("packages/z-app importer");
+        let tslib = app.iter().find(|d| d.name == "tslib").expect("tslib dep");
+        assert_eq!(
+            tslib.dep_path, "tslib@2.4.0",
+            "workspace dep must resolve to z-app/tslib, not hoisted tslib"
+        );
+    }
+
+    #[test]
+    fn test_parse_rebases_workspace_scoped_local_tarball() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let sri = fake_sri('a');
+        let content = r#"{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "root" },
+    "packages/app": {
+      "name": "app",
+      "dependencies": { "local-tar": "file:../../vendor/local-tar-1.0.0.tgz" }
+    }
+  },
+  "packages": {
+    "app": ["app@workspace:packages/app"],
+    "app/local-tar": ["local-tar@../../vendor/local-tar-1.0.0.tgz", {}, "SRI"]
+  }
+}"#
+        .replace("SRI", &sri);
+        std::fs::write(tmp.path(), &content).unwrap();
+        let graph = parse(tmp.path()).unwrap();
+
+        let local_tar = graph
+            .packages
+            .values()
+            .find(|p| p.name == "local-tar")
+            .expect("local-tar package");
+        assert_eq!(local_tar.version, "../../vendor/local-tar-1.0.0.tgz");
+        assert_eq!(
+            local_tar.local_source,
+            Some(LocalSource::Tarball(PathBuf::from(
+                "vendor/local-tar-1.0.0.tgz"
+            )))
         );
     }
 
